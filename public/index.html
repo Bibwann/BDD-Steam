@@ -1,13 +1,177 @@
-<!doctype html>
-<html lang="fr">
-  <head>
-    <meta charset="utf-8" />
-    <title>Mon Site</title>
-    <link href="/css/styles.css" rel="stylesheet" />
-  </head>
-  <body>
-    <h1>Bienvenue sur mon site</h1>
-    <ul id="items"></ul>
-    <script src="/js/main.js"></script>
-  </body>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Steam Game Database</title>
+
+  <!-- index.html está dentro de /public -->
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header Bar -->
+    <header class="header">
+      <div class="header-content">
+        <div class="header-left">
+          <div class="logo">
+            <h1>STEAM GAMES</h1>
+          </div>
+          <nav class="main-nav">
+            <button class="nav-btn active" data-category="all">All Games</button>
+            <button class="nav-btn" data-category="favorites">Favorites</button>
+            <button class="nav-btn" data-category="best">Best Games</button>
+            <button class="nav-btn" data-category="recommendations">Recommendations For You</button>
+            <button class="nav-btn" data-category="goty">GOTY</button>
+          </nav>
+        </div>
+
+        <div class="header-right">
+          <div class="search-container">
+            <input type="text" id="search-input" placeholder="Search games or developers..." />
+            <div class="search-icon">🔍</div>
+          </div>
+          <div class="platform-filters">
+            <button class="platform-btn active" data-platform="windows" title="Windows">
+              <span class="platform-icon">🪟</span>
+            </button>
+            <button class="platform-btn active" data-platform="mac" title="Mac">
+              <span class="platform-icon">🍎</span>
+            </button>
+            <button class="platform-btn active" data-platform="linux" title="Linux">
+              <span class="platform-icon">🐧</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Secondary Filter Bar -->
+    <div class="secondary-bar">
+      <div class="secondary-content">
+        <div class="filter-group">
+          <label for="sort-select">Sort by:</label>
+          <select id="sort-select" class="form-control">
+            <option value="name-asc">Name (A-Z)</option>
+            <option value="name-desc">Name (Z-A)</option>
+            <option value="date-desc">Release Date (Newest)</option>
+            <option value="date-asc">Release Date (Oldest)</option>
+            <option value="price-asc">Price (Low to High)</option>
+            <option value="price-desc">Price (High to Low)</option>
+            <option value="rating-desc">Rating (High to Low)</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label for="genre-select">Genre:</label>
+          <select id="genre-select" class="form-control">
+            <option value="">All Genres</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label for="language-select">Language:</label>
+          <select id="language-select" class="form-control">
+            <option value="">All Languages</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label for="multiplayer-select">Player Mode:</label>
+          <select id="multiplayer-select" class="form-control">
+            <option value="">All Modes</option>
+            <option value="single">Single-player</option>
+            <option value="multi">Multi-player</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label for="developer-select">Developer:</label>
+          <select id="developer-select" class="form-control">
+            <option value="">All Developers</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label>Price Range: $<span id="price-value">0-50</span></label>
+          <div class="price-range">
+            <input type="range" id="price-min" min="0" max="50" value="0" class="range-slider">
+            <input type="range" id="price-max" min="0" max="50" value="50" class="range-slider">
+          </div>
+        </div>
+
+        <div class="filter-group goty-filter" style="display: none;">
+          <label for="goty-year">GOTY Year:</label>
+          <select id="goty-year" class="form-control">
+            <option value="">All Years</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <div class="content-header">
+        <h2 id="content-title">All Games</h2>
+        <div class="content-actions">
+          <span id="results-count">0 games found</span>
+          <button id="add-goty-btn" class="btn btn--primary goty-add-btn" style="display: none;">
+            <span class="btn-icon">⭐</span>
+            Add GOTY
+          </button>
+        </div>
+      </div>
+
+      <div id="loading" class="loading" style="display: none;">
+        <div class="spinner"></div>
+        <p>Loading games...</p>
+      </div>
+
+      <div id="no-results" class="no-results" style="display: none;">
+        <div class="no-results-icon">🎮</div>
+        <h3>No games found</h3>
+        <p>Try adjusting your filters or search terms.</p>
+      </div>
+
+      <div id="games-grid" class="games-grid"></div>
+    </main>
+
+    <!-- GOTY Modal -->
+    <div id="goty-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Add Game of the Year</h3>
+          <button id="close-goty-modal" class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="goty-game-select">Select Game:</label>
+            <select id="goty-game-select" class="form-control">
+              <option value="">Choose a game...</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="goty-year-input">Year:</label>
+            <input type="number" id="goty-year-input" class="form-control" min="2000" max="2025" value="2024" />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="cancel-goty" class="btn btn--secondary">Cancel</button>
+          <button id="save-goty" class="btn btn--primary">Save GOTY</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- GOTY List Display -->
+    <div id="goty-list" class="goty-list" style="display: none;">
+      <h3>Game of the Year Awards</h3>
+      <div id="goty-entries" class="goty-entries"></div>
+    </div>
+  </div>
+
+  <!-- JS: primero la base de datos, luego la app -->
+  <script src="./js/database.js" defer></script>
+  <script src="./js/app.js" defer></script>
+  <div id="toaster" class="toaster" aria-live="polite" aria-atomic="true"></div>
+</body>
 </html>
