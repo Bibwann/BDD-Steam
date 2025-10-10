@@ -1,4 +1,4 @@
-version: "3.9"
+# no accents in code
 services:
   mongo:
     image: mongo:7
@@ -13,8 +13,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - MONGODB_URI=mongodb://mongo:27017/mon_site
-      - PORT=3000
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongo:27017/mon_site}
+      - PORT=${PORT:-3000}
     ports:
       - "3000:3000"
     depends_on:
