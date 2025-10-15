@@ -1,12 +1,14 @@
-<!DOCTYPE html>
-<html lang="es">
+<!doctype html>
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Steam Game Database</title>
 
-  <!-- index.html está dentro de /public -->
-  <link rel="stylesheet" href="./css/styles.css" />
+  <link rel="stylesheet" href="./css/styles.css"/>
+
+  
+  <script src="./js/filters.js" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -14,9 +16,7 @@
     <header class="header">
       <div class="header-content">
         <div class="header-left">
-          <div class="logo">
-            <h1>STEAM GAMES</h1>
-          </div>
+          <div class="logo"><h1>STEAM GAMES</h1></div>
           <nav class="main-nav">
             <button class="nav-btn active" data-category="all">All Games</button>
             <button class="nav-btn" data-category="favorites">Favorites</button>
@@ -28,7 +28,7 @@
 
         <div class="header-right">
           <div class="search-container">
-            <input type="text" id="search-input" placeholder="Search games or developers..." />
+            <input type="text" id="search-input" placeholder="Search games or developers..."/>
             <div class="search-icon">🔍</div>
           </div>
           <div class="platform-filters">
@@ -100,7 +100,7 @@
           </div>
         </div>
 
-        <div class="filter-group goty-filter" style="display: none;">
+        <div class="filter-group goty-filter" style="display:none;">
           <label for="goty-year">GOTY Year:</label>
           <select id="goty-year" class="form-control">
             <option value="">All Years</option>
@@ -115,28 +115,28 @@
         <h2 id="content-title">All Games</h2>
         <div class="content-actions">
           <span id="results-count">0 games found</span>
-          <button id="add-goty-btn" class="btn btn--primary goty-add-btn" style="display: none;">
-            <span class="btn-icon">⭐</span>
-            Add GOTY
+          <button id="add-goty-btn" class="btn btn--primary goty-add-btn" style="display:none;">
+            <span class="btn-icon">⭐</span> Add GOTY
           </button>
         </div>
       </div>
 
-      <div id="loading" class="loading" style="display: none;">
+      <div id="loading" class="loading" style="display:none;">
         <div class="spinner"></div>
         <p>Loading games...</p>
       </div>
 
-      <div id="no-results" class="no-results" style="display: none;">
+      <div id="no-results" class="no-results" style="display:none;">
         <div class="no-results-icon">🎮</div>
         <h3>No games found</h3>
         <p>Try adjusting your filters or search terms.</p>
       </div>
 
       <div id="games-grid" class="games-grid"></div>
+      
     </main>
 
-    <!-- GOTY Modal -->
+    <!-- GOTY Modal (UI en place, wiring optionnel) -->
     <div id="goty-modal" class="modal hidden">
       <div class="modal-content">
         <div class="modal-header">
@@ -152,7 +152,7 @@
           </div>
           <div class="form-group">
             <label for="goty-year-input">Year:</label>
-            <input type="number" id="goty-year-input" class="form-control" min="2000" max="2025" value="2024" />
+            <input type="number" id="goty-year-input" class="form-control" min="2000" max="2025" value="2024"/>
           </div>
         </div>
         <div class="modal-footer">
@@ -162,16 +162,12 @@
       </div>
     </div>
 
-    <!-- GOTY List Display -->
-    <div id="goty-list" class="goty-list" style="display: none;">
+    <div id="goty-list" class="goty-list" style="display:none;">
       <h3>Game of the Year Awards</h3>
       <div id="goty-entries" class="goty-entries"></div>
     </div>
   </div>
 
-  <!-- JS: primero la base de datos, luego la app -->
-  <script src="./js/database.js" defer></script>
-  <script src="./js/app.js" defer></script>
   <div id="toaster" class="toaster" aria-live="polite" aria-atomic="true"></div>
 </body>
 </html>
