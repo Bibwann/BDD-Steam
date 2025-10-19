@@ -1,4 +1,3 @@
-# no accents in code
 services:
   mongo:
     image: mongo:7
@@ -7,6 +6,12 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+      - ./seed:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   site:
     build: .
@@ -18,7 +23,8 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - mongo
+      mongo:
+        condition: service_healthy
 
 volumes:
   mongo_data:

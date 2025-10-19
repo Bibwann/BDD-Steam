@@ -2,58 +2,72 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import Game from "../models/Game.js";
+import Goty from "../models/Goty.js"; // <-- NEW
 
 const router = Router();
 
 /* -------------------------------------------------------------------------- */
-/* utils: filtres -> $match                                                    */
+/* utils: diacritic-insensitive regex                                         */
+/* -------------------------------------------------------------------------- */
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+const DIACRITIC_MAP = {
+  a: "aàáâäãåāăą",
+  c: "cçćčĉ",
+  d: "dďđ",
+  e: "eèéêëēĕėę",
+  g: "gğĝ",
+  h: "hĥȟ",
+  i: "iìíîïīĭį",
+  l: "lĺļľł",
+  n: "nñńňņ",
+  o: "oòóôöõōŏő",
+  r: "rŕŗř",
+  s: "sßśšşș",
+  t: "tţťț",
+  u: "uùúûüūŭůű",
+  y: "yýÿŷ",
+  z: "zźżž",
+};
+function toDiacriticRegex(source) {
+  const chars = String(source).split("");
+  const out = chars.map((ch) => {
+    const low = ch.toLowerCase();
+    if (DIACRITIC_MAP[low]) {
+      const cls = DIACRITIC_MAP[low].split("")
+        .map(escapeRegExp)
+        .join("");
+      return `[${cls}]`;
+    }
+    return escapeRegExp(ch);
+  });
+  return out.join("");
+}
+
+/* -------------------------------------------------------------------------- */
+/* utils: filters -> $match                                                   */
 /* -------------------------------------------------------------------------- */
 /**
- * Construit un objet $match pour l’agrégation selon les filtres fournis.
- *
- * ÉQUIVALENT "commande Mongo" (exemples):
- *  - Recherche texte (name/dev/genres):
- *      db.games.find({ $or: [ {name:/q/i}, {developers:/q/i}, {genres:/q/i} ] })
- *
- *  - Catégorie "best" (score >= 80):
- *      db.games.find({ user_score: { $gte: 80 } })
- *
- *  - Plateformes (OR):
- *      db.games.find({ $or: [ {windows:true}, {mac:true}, {linux:true} ] })
- *
- *  - Genre (présent dans array):
- *      db.games.find({ genres: "Action" })
- *
- *  - Langue (présente dans array):
- *      db.games.find({ supported_languages: "English" })
- *
- *  - Multi/Solo via categories:
- *      db.games.find({ categories: "Multi-player" })
- *      db.games.find({ categories: "Single-player" })
- *
- *  - Développeur:
- *      db.games.find({ $or: [{developers:"Valve"}, {developers:/Valve/i}] })
- *
- *  - Prix min/max:
- *      db.games.find({ price: { $gte: 0, $lte: 50 } })
- *
- *  - GOTY (année exacte ou simple présence):
- *      db.games.find({ goty_year: 2020 })
- *      db.games.find({ goty_year: { $exists: true } })
+ * Build a $match object for aggregation according to provided filters.
+ * Adds "kid" profile safety exclusions using MongoDB-only conditions.
  */
 function buildMatch(f = {}) {
   const and = [];
 
-  // Texte (name, developers, genres)
+  // Text search (name, developers, genres) with diacritic-insensitive pattern
   if (f.search && String(f.search).trim()) {
-    const rx = new RegExp(String(f.search).trim(), "i");
+    const pattern = toDiacriticRegex(String(f.search).trim());
+    const rx = new RegExp(pattern, "i");
     and.push({ $or: [{ name: rx }, { developers: rx }, { genres: rx }] });
   }
 
-  // Catégories “rapides”
+  // Quick categories (favorites is handled by appids on the frontend)
   switch (f.category) {
     case "favorites":
-      and.push({ favorite: true });
+      if (!(Array.isArray(f.appids) && f.appids.length)) {
+        and.push({ favorite: true });
+      }
       break;
     case "best":
       and.push({ user_score: { $gte: 80 } });
@@ -61,63 +75,98 @@ function buildMatch(f = {}) {
     case "recommendations":
       and.push({ recommendations: { $gt: 0 } });
       break;
-    case "goty":
-      if (f.gotyYear) and.push({ goty_year: Number(f.gotyYear) });
-      else and.push({ goty_year: { $exists: true } });
-      break;
+    // NOTE: for category "goty" we will filter AFTER the $lookup stage.
     default:
-      // "all" | undefined → rien
       break;
   }
 
-  // Plateformes (au moins une cochée -> OR)
+  // Platforms (OR if any)
   const ors = [];
   if (f.platforms?.windows || f.windows === "1") ors.push({ windows: true });
   if (f.platforms?.mac     || f.mac === "1")     ors.push({ mac: true });
   if (f.platforms?.linux   || f.linux === "1")   ors.push({ linux: true });
   if (ors.length) and.push({ $or: ors });
 
-  // Genre (présence dans array)
+  // Genre (must be present in array)
   if (f.genre) and.push({ genres: f.genre });
 
-  // Langue (présence dans array)
+  // Language (must be present in array)
   if (f.language) and.push({ supported_languages: f.language });
 
-  // Multi/Solo (présence dans array categories)
+  // FAVORITES by appids (frontend sends appids array)
+  if (Array.isArray(f.appids) && f.appids.length) {
+    const ids = f.appids.map(v => String(v));
+    and.push({ appid: { $in: ids } });
+  }
+
+  // Single / Multi via categories array
   if (f.multiplayer === "single") and.push({ categories: "Single-player" });
   if (f.multiplayer === "multi")  and.push({ categories: "Multi-player" });
 
-  // Développeur
+  // Developer (exact or regex, diacritic-insensitive)
   if (f.developer) {
     const dev = String(f.developer).trim();
-    and.push({ $or: [{ developers: dev }, { developers: new RegExp(dev, "i") }] });
+    const devPattern = new RegExp(toDiacriticRegex(dev), "i");
+    and.push({ $or: [{ developers: dev }, { developers: devPattern }] });
   }
 
-  // Prix min/max (toujours borné)
+  // Price range (always bounded)
   const min = f.priceMin != null ? Number(f.priceMin) : 0;
   const max = f.priceMax != null ? Number(f.priceMax) : 999999;
   and.push({ price: { $gte: min, $lte: max } });
+
+  /* ------------------------ KID profile safety filter --------------------- */
+if (String(f.profile) === "kid") {
+  // Categories/tags to exclude
+  const badTags = ["Violent", "Sexual Content", "Nudity", "Gore", "Hentai", "Loli", "Porn", "Erotic", "XXX"];
+
+  // Title words to exclude
+  const badWords = ["Hentai", "Porn", "Sex", "Nude", "Erotic", "XXX", "NSFW", "Loli", "Nudity", "Gore", "Violent"];
+  const rxBadName = new RegExp(
+    badWords.map(w => toDiacriticRegex(w)).join("|"),
+    "i"
+  );
+
+  // Tags can come as array or string
+  const rxBadTags = new RegExp(
+    badTags.map(w => toDiacriticRegex(w)).join("|"),
+    "i"
+  );
+
+  // NEW: developer words to exclude
+  const badDevTerms = ["NSFW", "Hentai"];
+  const rxBadDev = new RegExp(
+    badDevTerms.map(w => toDiacriticRegex(w)).join("|"),
+    "i"
+  );
+
+  and.push({
+    $nor: [
+      // tags/genres/categories
+      { categories:    { $elemMatch: { $in: badTags } } },
+      { genres:        { $elemMatch: { $in: badTags } } },
+      { tags:          { $elemMatch: { $in: badTags } } },          // array
+      { steamspy_tags: { $elemMatch: { $in: badTags } } },          // array
+      { steamspy_tags: rxBadTags },                                 // string
+
+      // title
+      { name: rxBadName },
+
+      // NEW: developers (supports array or string)
+      { developers: { $elemMatch: { $regex: rxBadDev } } },         // array of devs
+      { developers:   rxBadDev },                                   // single string field
+    ],
+  });
+}
+/* ----------------------------------------------------------------------- */
 
   if (and.length === 0) return {};
   return and.length === 1 ? and[0] : { $and: and };
 }
 
 /* -------------------------------------------------------------------------- */
-/* utils: tri -> $sort                                                         */
+/* utils: sort -> $sort                                                       */
 /* -------------------------------------------------------------------------- */
-/**
- * Tri disponibles:
- *  - "name-asc"    → { name: 1 }
- *  - "name-desc"   → { name: -1 }
- *  - "price-asc"   → { price: 1 }
- *  - "price-desc"  → { price: -1 }
- *  - "date-desc"   → { release_date_parsed: -1 }
- *  - "date-asc"    → { release_date_parsed: 1 }
- *  - "rating-desc" → { user_score: -1 }
- *
- * ÉQUIVALENT "commande Mongo":
- *    db.games.find(...).sort({ price: -1 })
- */
 function buildSort(sortKey = "name-asc") {
   return {
     "name-asc":    { name: 1 },
@@ -131,44 +180,50 @@ function buildSort(sortKey = "name-asc") {
 }
 
 /* -------------------------------------------------------------------------- */
-/* utils: projection liste                                                     */
+/* utils: projection list                                                     */
 /* -------------------------------------------------------------------------- */
-/**
- * Projection par défaut pour les cartes:
- *  { name:1, header_image:1, genres:1, price:1 }
- *
- * ÉQUIVALENT "commande Mongo":
- *    db.games.find(query, { name:1, header_image:1, genres:1, price:1 })
- */
 function buildProjectList(reqProjection) {
   if (reqProjection && typeof reqProjection === "object") return reqProjection;
   return { name: 1, header_image: 1, genres: 1, price: 1 };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Pipeline principal: $facet items + total                                   */
+/* helpers: GOTY per-profile join                                             */
 /* -------------------------------------------------------------------------- */
 /**
- * Étapes:
- *  - $addFields release_date_parsed (parse "Oct 21, 2008")
- *  - $match (issu de buildMatch)
- *  - $facet:
- *      items: $sort → $skip → $limit → $project
- *      meta:  $count: "total"
- *
- * ÉQUIVALENT "commande Mongo":
- *    db.games.aggregate([
- *      { $addFields: { release_date_parsed: { $dateFromString: { dateString:"$release_date", format:"%b %d, %Y", onError:null, onNull:null }}}},
- *      { $match: ... },
- *      { $facet: {
- *          items: [ { $sort: ... }, { $skip: N }, { $limit: L }, { $project: ... } ],
- *          meta:  [ { $count: "total" } ]
- *      }},
- *      { $unwind: { path: "$meta", preserveNullAndEmptyArrays: true } },
- *      { $addFields: { total: { $ifNull: ["$meta.total", 0] } } },
- *      { $project: { meta: 0 } }
- *    ])
+ * Lookup GOTY for the current profile and attach "goty_year" to the game.
  */
+function gotyJoinStages(profile = "person1") {
+  return [
+    {
+      $lookup: {
+        from: "gotys",
+        let: { app: "$appid" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ["$appid", "$$app"] },
+                  { $eq: ["$profile", String(profile || "person1")] },
+                ],
+              },
+            },
+          },
+          { $project: { _id: 0, year: 1 } },
+          { $limit: 1 },
+        ],
+        as: "gotyP",
+      },
+    },
+    { $addFields: { goty_year: { $ifNull: [{ $arrayElemAt: ["$gotyP.year", 0] }, null] } } },
+    { $project: { gotyP: 0 } },
+  ];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Main pipeline: $facet items + total                                        */
+/* -------------------------------------------------------------------------- */
 function buildSearchPipeline({
   filters = {},
   sort = "name-asc",
@@ -180,8 +235,10 @@ function buildSearchPipeline({
   const $match = buildMatch(filters);
   const $sort  = buildSort(sort);
   const $project = buildProjectList(projection);
+  const profile = String(filters.profile || "person1");
 
-  return [
+  // Base pipeline
+  const base = [
     {
       $addFields: {
         release_date_parsed: {
@@ -195,6 +252,22 @@ function buildSearchPipeline({
       },
     },
     Object.keys($match).length ? { $match } : null,
+    ...gotyJoinStages(profile), // <-- attach goty_year per profile
+  ].filter(Boolean);
+
+  // If category is "goty", filter by join result (and optional year)
+  const postMatch = [];
+  if (filters.category === "goty") {
+    if (filters.gotyYear) {
+      postMatch.push({ $match: { goty_year: Number(filters.gotyYear) } });
+    } else {
+      postMatch.push({ $match: { goty_year: { $ne: null } } });
+    }
+  }
+
+  return [
+    ...base,
+    ...postMatch,
     {
       $facet: {
         items: [
@@ -209,29 +282,12 @@ function buildSearchPipeline({
     { $unwind: { path: "$meta", preserveNullAndEmptyArrays: true } },
     { $addFields: { total: { $ifNull: ["$meta.total", 0] } } },
     { $project: { meta: 0 } },
-  ].filter(Boolean);
+  ];
 }
 
 /* -------------------------------------------------------------------------- */
-/* POST /api/games/search                                                      */
+/* POST /api/games/search                                                     */
 /* -------------------------------------------------------------------------- */
-/**
- * Body JSON attendu:
- * {
- *   filters: {
- *     category, search, platforms:{windows,mac,linux},
- *     genre, language, multiplayer, developer,
- *     priceMin, priceMax, gotyYear
- *   },
- *   sort: "name-asc" | "price-desc" | "date-asc" | "rating-desc" | ...,
- *   page: 1, limit: 40,
- *   projection: { name:1, header_image:1, ... },    // optionnel
- *   withTotal: true                                  // optionnel (perf)
- * }
- *
- * NOTE perf: on peut mettre withTotal=false à partir de la page 2,
- * pour éviter le $count coûteux; on déduit alors "hasMore" via (items.length === limit).
- */
 router.post("/search", async (req, res) => {
   try {
     const {
@@ -244,8 +300,9 @@ router.post("/search", async (req, res) => {
     } = req.body || {};
 
     const skip = (Math.max(1, Number(page)) - 1) * Math.max(1, Number(limit));
+    const profile = String(filters.profile || "person1");
 
-    // Variante plus légère (sans count) quand withTotal=false
+    // Lightweight pipeline (no $count) when withTotal=false
     const pipeline = withTotal
       ? buildSearchPipeline({ filters, sort, page, limit, projection })
       : [
@@ -265,13 +322,30 @@ router.post("/search", async (req, res) => {
             const $match = buildMatch(filters);
             return Object.keys($match).length ? [{ $match }] : [];
           })(),
+          ...gotyJoinStages(profile), // <-- keep goty_year in lightweight pipeline too
+          // Same post-filter for "goty" category
+          ...(() => {
+            if (filters.category !== "goty") return [];
+            if (filters.gotyYear) return [{ $match: { goty_year: Number(filters.gotyYear) } }];
+            return [{ $match: { goty_year: { $ne: null } } }];
+          })(),
           { $sort: buildSort(sort) },
           { $skip: skip },
           { $limit: Math.max(1, Number(limit)) },
           { $project: buildProjectList(projection) },
         ];
 
-    const out = await Game.aggregate(pipeline).allowDiskUse(true);
+    let agg = Game.aggregate(pipeline).allowDiskUse(true);
+
+    // Use locale collation when text filters exist (ignores case/accents)
+    if (
+      (filters && String(filters.search || "").trim()) ||
+      (filters && String(filters.developer || "").trim())
+    ) {
+      agg = agg.collation({ locale: "es", strength: 1, caseLevel: false });
+    }
+
+    const out = await agg;
 
     let items = [];
     let total = null;
@@ -304,23 +378,6 @@ router.post("/search", async (req, res) => {
 /* -------------------------------------------------------------------------- */
 /* DISTINCT endpoints (genres / languages / developers)                       */
 /* -------------------------------------------------------------------------- */
-/**
- * Pipeline commun:
- *   [{ $match: ...? },
- *    { $unwind: "$<field>" },
- *    { $group: { _id: { $trim: { input: { $toString: "$<field>" } } } } },
- *    { $match: { _id: { $ne: "" } } },
- *    { $sort: { _id: 1 } },
- *    { $project: { _id: 0, value: "$_id" } }]
- *
- * ÉQUIVALENT "commande Mongo":
- *   db.games.aggregate([
- *     { $unwind: "$genres" },
- *     { $group: { _id: "$genres" } },
- *     { $sort: { _id: 1 } },
- *     { $project: { value: "$_id", _id: 0 } }
- *   ])
- */
 function buildDistinctPipeline(field, filters = {}) {
   const $match = buildMatch(filters);
   return [
@@ -371,15 +428,8 @@ router.get("/distinct/developers", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* GET /api/games/:id  (par _id ou appid)                                     */
+/* GET /api/games/:id  (by _id or appid)                                      */
 /* -------------------------------------------------------------------------- */
-/**
- * ÉQUIVALENT "commande Mongo":
- *  - Par _id:
- *      db.games.find({ _id: ObjectId("...") })
- *  - Sinon par appid (string dans ton dataset):
- *      db.games.find({ appid: "<id>" })
- */
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -398,18 +448,8 @@ router.get("/:id", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* RAW AGGREGATE endpoint (exécuter des pipelines bruts)                      */
+/* RAW AGG endpoint                                                           */
 /* -------------------------------------------------------------------------- */
-/**
- * POST /api/games/agg
- * Body: { pipeline: [...] }  OU  { command: "db.games.aggregate([ ... ])" }
- * Options: { allowDiskUse: true, maxTimeMS: 5000 }
- *
- * Sécurité: on whiteliste les stages + on refuse $where/$function/$accumulator.
- *
- * ÉQUIVALENT "commande Mongo":
- *   db.games.aggregate([ ... ])
- */
 const ALLOWED_STAGES = new Set([
   "$match", "$project", "$sort", "$limit", "$skip",
   "$unwind", "$group", "$lookup", "$addFields", "$set",
@@ -459,6 +499,64 @@ router.post("/agg", async (req, res) => {
     console.error("RAW AGG error:", e);
     const msg = e instanceof SyntaxError ? "syntax_error" : e.message || "server_error";
     res.status(400).json({ ok: false, error: msg });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* GOTY endpoints: per-profile set / unset                                    */
+/* -------------------------------------------------------------------------- */
+/**
+ * POST /api/games/goty/set
+ * Body: { appid: "20200", year: 2008, profile: "kid" | "person1" | "person2" }
+ * Guarantees: only one GOTY per (profile, year).
+ */
+router.post("/goty/set", async (req, res) => {
+  try {
+    const { appid, year, profile = "person1" } = req.body || {};
+    const y = Number(year);
+    const p = String(profile);
+    if (!appid || !y || !Number.isFinite(y) || !["kid","person1","person2"].includes(p)) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    // 1) Remove any previous GOTY for (profile, year)
+    await Goty.deleteOne({ profile: p, year: y });
+
+    // 2) Set new
+    await Goty.create({ profile: p, year: y, appid: String(appid) });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("POST /api/games/goty/set error:", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+/**
+ * POST /api/games/goty/unset
+ * Body: { year: 2008, profile }  OR  { appid: "20200", profile }
+ * Removes GOTY status for that profile.
+ */
+router.post("/goty/unset", async (req, res) => {
+  try {
+    const { year, appid, profile = "person1" } = req.body || {};
+    const p = String(profile);
+    if (!["kid","person1","person2"].includes(p)) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+    const q = year != null
+      ? { profile: p, year: Number(year) }
+      : appid
+        ? { profile: p, appid: String(appid) }
+        : null;
+
+    if (!q) return res.status(400).json({ ok: false, error: "bad_request" });
+
+    const r = await Goty.deleteMany(q);
+    res.json({ ok: true, modified: r.deletedCount || 0 });
+  } catch (e) {
+    console.error("POST /api/games/goty/unset error:", e);
+    res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 

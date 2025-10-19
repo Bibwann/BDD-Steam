@@ -1,64 +1,73 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-color-scheme="dark">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Steam Game Database</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Steam Games</title>
 
-  <link rel="stylesheet" href="./css/styles.css"/>
-
-  
-  <script src="./js/filters.js" defer></script>
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="stylesheet" href="/css/styles.css" />
 </head>
 <body>
   <div class="app-container">
-    <!-- Header Bar -->
+    <!-- Header -->
     <header class="header">
       <div class="header-content">
         <div class="header-left">
-          <div class="logo"><h1>STEAM GAMES</h1></div>
-          <nav class="main-nav">
-            <button class="nav-btn active" data-category="all">All Games</button>
-            <button class="nav-btn" data-category="favorites">Favorites</button>
-            <button class="nav-btn" data-category="best">Best Games</button>
-            <button class="nav-btn" data-category="recommendations">Recommendations For You</button>
-            <button class="nav-btn" data-category="goty">GOTY</button>
+          <div class="logo">
+            <h1>STEAM GAMES</h1>
+          </div>
+
+          <!-- Main nav -->
+          <nav class="main-nav" aria-label="Main categories">
+            <button class="nav-btn active" data-category="all" type="button">All Games</button>
+            <button class="nav-btn" data-category="favorites" type="button">Favorites</button>
+            <button class="nav-btn" data-category="best" type="button">Best Games</button>
+            <button class="nav-btn" data-category="recommendations" type="button">Recommendations For You</button>
+            <button class="nav-btn" data-category="goty" type="button">GOTY</button>
           </nav>
         </div>
 
         <div class="header-right">
-          <div class="search-container">
-            <input type="text" id="search-input" placeholder="Search games or developers..."/>
-            <div class="search-icon">🔍</div>
+          <!-- Search -->
+          <div class="search-container" role="search">
+            <input id="search-input" type="search" placeholder="Search games or developers..." aria-label="Search" />
+            <span class="search-icon">🔎</span>
           </div>
-          <div class="platform-filters">
-            <button class="platform-btn active" data-platform="windows" title="Windows">
-              <span class="platform-icon">🪟</span>
-            </button>
-            <button class="platform-btn active" data-platform="mac" title="Mac">
-              <span class="platform-icon">🍎</span>
-            </button>
-            <button class="platform-btn active" data-platform="linux" title="Linux">
-              <span class="platform-icon">🐧</span>
-            </button>
+
+          <!-- Profile switcher (NEW) -->
+          <div class="profile-switcher" title="Current profile">
+            <label for="profile-select">Profile:</label>
+            <select id="profile-select" class="form-control">
+              <option value="kid">Kid</option>
+              <option value="person1">Person 1</option>
+              <option value="person2">Person 2</option>
+            </select>
+          </div>
+
+          <!-- Platforms quick filters -->
+          <div class="platform-filters" aria-label="Platforms">
+            <button class="platform-btn" data-platform="windows" title="Windows" type="button">🪟</button>
+            <button class="platform-btn" data-platform="mac" title="macOS" type="button">🍎</button>
+            <button class="platform-btn" data-platform="linux" title="Linux" type="button">🐧</button>
           </div>
         </div>
       </div>
     </header>
 
-    <!-- Secondary Filter Bar -->
-    <div class="secondary-bar">
+    <!-- Secondary filters bar -->
+    <section class="secondary-bar" aria-label="Filters">
       <div class="secondary-content">
         <div class="filter-group">
           <label for="sort-select">Sort by:</label>
           <select id="sort-select" class="form-control">
-            <option value="name-asc">Name (A-Z)</option>
-            <option value="name-desc">Name (Z-A)</option>
-            <option value="date-desc">Release Date (Newest)</option>
-            <option value="date-asc">Release Date (Oldest)</option>
-            <option value="price-asc">Price (Low to High)</option>
-            <option value="price-desc">Price (High to Low)</option>
-            <option value="rating-desc">Rating (High to Low)</option>
+            <option value="name-asc">Name (A–Z)</option>
+            <option value="name-desc">Name (Z–A)</option>
+            <option value="price-asc">Price (Low → High)</option>
+            <option value="price-desc">Price (High → Low)</option>
+            <option value="date-desc">Release date (New → Old)</option>
+            <option value="date-asc">Release date (Old → New)</option>
+            <option value="rating-desc">Rating</option>
           </select>
         </div>
 
@@ -85,45 +94,49 @@
           </select>
         </div>
 
-        <div class="filter-group">
+        <div class="filter-group" style="min-width:260px; flex:1">
           <label for="developer-select">Developer:</label>
           <select id="developer-select" class="form-control">
             <option value="">All Developers</option>
           </select>
         </div>
 
-        <div class="filter-group">
-          <label>Price Range: $<span id="price-value">0-50</span></label>
-          <div class="price-range">
-            <input type="range" id="price-min" min="0" max="50" value="0" class="range-slider">
-            <input type="range" id="price-max" min="0" max="50" value="50" class="range-slider">
+        <!-- Price range -->
+        <div class="filter-group" style="min-width:260px">
+          <label>Price Range: <span id="price-value">0-50</span></label>
+          <div class="price-range" aria-label="Price range">
+            <input id="price-min" type="range" min="0" max="50" step="1" value="0" class="range-slider" aria-label="Min price" />
+            <input id="price-max" type="range" min="0" max="50" step="1" value="50" class="range-slider" aria-label="Max price" />
           </div>
         </div>
 
-        <div class="filter-group goty-filter" style="display:none;">
-          <label for="goty-year">GOTY Year:</label>
+        <!-- GOTY specific controls (shown only in the GOTY tab by JS) -->
+        <div class="filter-group goty-filter" style="display:none; min-width:220px;">
+          <label for="goty-year">GOTY year filter:</label>
           <select id="goty-year" class="form-control">
-            <option value="">All Years</option>
+            <option value="">All years</option>
           </select>
         </div>
-      </div>
-    </div>
 
-    <!-- Main Content -->
+        <div class="filter-group goty-filter" style="display:none; align-items:flex-end; min-width:140px;">
+          <label>&nbsp;</label>
+          <button id="add-goty-btn" class="btn btn--primary" type="button">Add GOTY</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main content -->
     <main class="main-content">
       <div class="content-header">
         <h2 id="content-title">All Games</h2>
         <div class="content-actions">
           <span id="results-count">0 games found</span>
-          <button id="add-goty-btn" class="btn btn--primary goty-add-btn" style="display:none;">
-            <span class="btn-icon">⭐</span> Add GOTY
-          </button>
         </div>
       </div>
 
       <div id="loading" class="loading" style="display:none;">
-        <div class="spinner"></div>
-        <p>Loading games...</p>
+        <div class="spinner" aria-hidden="true"></div>
+        <div>Loading…</div>
       </div>
 
       <div id="no-results" class="no-results" style="display:none;">
@@ -132,42 +145,26 @@
         <p>Try adjusting your filters or search terms.</p>
       </div>
 
-      <div id="games-grid" class="games-grid"></div>
-      
+      <div id="games-grid" class="games-grid" aria-live="polite" aria-busy="false"></div>
     </main>
-
-    <!-- GOTY Modal (UI en place, wiring optionnel) -->
-    <div id="goty-modal" class="modal hidden">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h3>Add Game of the Year</h3>
-          <button id="close-goty-modal" class="modal-close">&times;</button>
-        </div>
-        <div class="modal-body">
-          <div class="form-group">
-            <label for="goty-game-select">Select Game:</label>
-            <select id="goty-game-select" class="form-control">
-              <option value="">Choose a game...</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label for="goty-year-input">Year:</label>
-            <input type="number" id="goty-year-input" class="form-control" min="2000" max="2025" value="2024"/>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button id="cancel-goty" class="btn btn--secondary">Cancel</button>
-          <button id="save-goty" class="btn btn--primary">Save GOTY</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="goty-list" class="goty-list" style="display:none;">
-      <h3>Game of the Year Awards</h3>
-      <div id="goty-entries" class="goty-entries"></div>
-    </div>
   </div>
 
   <div id="toaster" class="toaster" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="/js/filters.js" defer></script>
+  <script>
+    // Fill GOTY year filter on load
+    document.addEventListener("DOMContentLoaded", () => {
+      const sel = document.getElementById("goty-year");
+      if (sel) {
+        const now = new Date().getFullYear();
+        const years = Array.from({length: now - 1989}, (_, i) => now - i);
+        sel.insertAdjacentHTML(
+          "beforeend",
+          years.map(y => `<option value="${y}">${y}</option>`).join("")
+        );
+      }
+    });
+  </script>
 </body>
 </html>
