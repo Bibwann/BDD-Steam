@@ -560,4 +560,172 @@ router.post("/goty/unset", async (req, res) => {
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/* POST /api/games/recommendations                                            */
+/* Body: { appid: "STRING", page?, limit?, filters?, projection? }            */
+/* Renvoie: { ok, page, limit, total, hasMore, items }                        */
+/* -------------------------------------------------------------------------- */
+router.post("/recommendations", async (req, res) => {
+  try {
+    const {
+      appid,
+      page = 1,
+      limit = 20,
+      filters = {},
+      projection,
+    } = req.body || {};
+
+    if (!appid) return res.status(400).json({ ok: false, error: "missing_appid" });
+
+    const $matchBase = buildMatch(filters);
+    const $project   = buildProjectList(projection);
+    const skip       = (Math.max(1, Number(page)) - 1) * Math.max(1, Number(limit));
+
+    const pipeline = [
+      /* 1) Jeu seed */
+      { $match: { appid: String(appid) } },
+      {
+        $project: {
+          _id: 0,
+          seed_appid: "$appid",
+          seed_genres: { $ifNull: ["$genres", []] },
+          seed_categories: { $ifNull: ["$categories", []] },
+          seed_developers: { $ifNull: ["$developers", []] },
+          seed_publishers: { $ifNull: ["$publishers", []] },
+          seed_languages: { $ifNull: ["$supported_languages", []] },
+          seed_os: [
+            { $cond: ["$windows", "windows", null] },
+            { $cond: ["$mac", "mac", null] },
+            { $cond: ["$linux", "linux", null] },
+          ],
+          seed_tags: {
+            $ifNull: [
+              { $map: { input: { $objectToArray: { $ifNull: ["$tags", {}] } }, in: "$$this.k" } },
+              []
+            ]
+          },
+        }
+      },
+      /* 2) Cross-join contrôlé vers candidats filtrés par tes règles */
+      {
+        $lookup: {
+          from: "games",
+          let: {
+            seed_appid: "$seed_appid",
+            seed_genres: "$seed_genres",
+            seed_categories: "$seed_categories",
+            seed_developers: "$seed_developers",
+            seed_publishers: "$seed_publishers",
+            seed_languages: "$seed_languages",
+            seed_os: "$seed_os",
+            seed_tags: "$seed_tags",
+          },
+          pipeline: [
+            { $match: { ...$matchBase } },
+            { $match: { $expr: { $ne: ["$appid", "$$seed_appid"] } } },
+            {
+              $addFields: {
+                _genres: { $ifNull: ["$genres", []] },
+                _categories: { $ifNull: ["$categories", []] },
+                _developers: { $ifNull: ["$developers", []] },
+                _publishers: { $ifNull: ["$publishers", []] },
+                _languages: { $ifNull: ["$supported_languages", []] },
+                _os: [
+                  { $cond: ["$windows", "windows", null] },
+                  { $cond: ["$mac", "mac", null] },
+                  { $cond: ["$linux", "linux", null] },
+                ],
+                _tags: {
+                  $ifNull: [
+                    { $map: { input: { $objectToArray: { $ifNull: ["$tags", {}] } }, in: "$$this.k" } },
+                    []
+                  ]
+                },
+                _pos: { $ifNull: ["$positive", 0] },
+                _neg: { $ifNull: ["$negative", 0] },
+              }
+            },
+            /* Similarité + boosts */
+            {
+              $addFields: {
+                sim_genres: { $size: { $setIntersection: ["$_genres", "$$seed_genres"] } },
+                sim_categories: { $size: { $setIntersection: ["$_categories", "$$seed_categories"] } },
+                sim_devs: { $size: { $setIntersection: ["$_developers", "$$seed_developers"] } },
+                sim_pubs: { $size: { $setIntersection: ["$_publishers", "$$seed_publishers"] } },
+                sim_lang: { $size: { $setIntersection: ["$_languages", "$$seed_languages"] } },
+                sim_os: { $size: { $setIntersection: ["$_os", "$$seed_os"] } },
+                sim_tags: { $size: { $setIntersection: ["$_tags", "$$seed_tags"] } },
+                rating: {
+                  $cond: [
+                    { $gt: [{ $add: ["$_pos", "$_neg"] }, 0] },
+                    { $divide: ["$_pos", { $add: ["$_pos", "$_neg"] }] },
+                    0
+                  ]
+                },
+                popBoost: { $divide: [{ $log10: { $add: [1, { $add: ["$_pos", "$_neg"] }] } }, 5] }
+              }
+            },
+            {
+              $addFields: {
+                similarity_score: {
+                  $add: [
+                    { $multiply: ["$sim_genres", 3] },
+                    { $multiply: ["$sim_tags", 2.5] },
+                    { $multiply: ["$sim_categories", 1.5] },
+                    { $multiply: ["$sim_devs", 1.2] },
+                    { $multiply: ["$sim_pubs", 0.8] },
+                    { $multiply: ["$sim_os", 0.6] },
+                    { $multiply: ["$sim_lang", 0.4] },
+                    { $multiply: ["$rating", 2] },
+                    "$popBoost"
+                  ]
+                }
+              }
+            },
+            { $sort: { similarity_score: -1, user_score: -1, recommendations: -1, name: 1 } },
+          ],
+          as: "candidates"
+        }
+      },
+      { $unwind: "$candidates" },
+      { $replaceRoot: { newRoot: "$candidates" } },
+      {
+        $facet: {
+          items: [{ $skip: skip }, { $limit: Math.max(1, Number(limit)) }, { $project: $project }],
+          totalCount: [{ $count: "n" }]
+        }
+      },
+      {
+        $project: {
+          items: 1,
+          total: { $ifNull: [{ $arrayElemAt: ["$totalCount.n", 0] }, 0] }
+        }
+      }
+    ];
+
+    let agg = Game.aggregate(pipeline);
+
+    // Conserve ta collation pour search/dev
+    if (
+      (filters && String(filters.search || "").trim()) ||
+      (filters && String(filters.developer || "").trim())
+    ) {
+      agg = agg.collation({ locale: "es", strength: 1, caseLevel: false });
+    }
+
+    const out   = await agg;
+    const node  = out[0] || {};
+    const items = node.items || [];
+    const total = node.total || 0;
+    const hasMore = (skip + items.length) < total;
+
+    res.json({ ok: true, page: Number(page), limit: Number(limit), total, hasMore, items });
+  } catch (e) {
+    console.error("POST /api/games/recommendations error:", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+
+
 export default router;

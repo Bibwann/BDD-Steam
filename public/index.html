@@ -22,7 +22,6 @@
           <nav class="main-nav" aria-label="Main categories">
             <button class="nav-btn active" data-category="all" type="button">All Games</button>
             <button class="nav-btn" data-category="favorites" type="button">Favorites</button>
-            <button class="nav-btn" data-category="best" type="button">Best Games</button>
             <button class="nav-btn" data-category="recommendations" type="button">Recommendations For You</button>
             <button class="nav-btn" data-category="goty" type="button">GOTY</button>
           </nav>
@@ -35,12 +34,12 @@
             <span class="search-icon">🔎</span>
           </div>
 
-          <!-- Profile switcher (NEW) -->
+          <!-- Profile switcher -->
           <div class="profile-switcher" title="Current profile">
             <label for="profile-select">Profile:</label>
             <select id="profile-select" class="form-control">
               <option value="kid">Kid</option>
-              <option value="person1">Person 1</option>
+              <option value="person1" selected>Person 1</option>
               <option value="person2">Person 2</option>
             </select>
           </div>
@@ -121,6 +120,13 @@
         <div class="filter-group goty-filter" style="display:none; align-items:flex-end; min-width:140px;">
           <label>&nbsp;</label>
           <button id="add-goty-btn" class="btn btn--primary" type="button">Add GOTY</button>
+        </div>
+
+ 
+
+        <div class="filter-group recos-filter" style="display:none; min-width:240px;">
+          <label for="seed-appid">Jeu de référence (appid) :</label>
+          <input id="seed-appid" class="form-control" type="text" placeholder="ex: 1026420" />
         </div>
       </div>
     </section>
