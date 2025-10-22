@@ -1,24 +1,65 @@
 <!doctype html>
+<!--
+  ===========================================================
+  Steam Games — App Shell (HTML + Accessibility + Hooks)
+  -----------------------------------------------------------
+  What lives here:
+  - Static structure, ARIA roles, and data-* hooks that
+    the JS layer (/js/filters.js) reads and manipulates.
+  - Filter controls (selects, ranges, buttons) identified
+    by IDs/classes that the JS queries (getElementById /
+    querySelector) to build the search payload.
+
+  How it ties to the JS you saw:
+  - #profile-select persists to localStorage (PROFILE_KEY)
+    and forces a reload so the backend responds per-profile.
+  - .main-nav .nav-btn[data-category] drives "category", used
+    by runSearch() to switch "all / favorites / recommendations / goty".
+  - #search-input is debounced and feeds "filters.search".
+  - .platform-btn[data-platform] toggles windows/mac/linux flags.
+  - #genre-select / #language-select / #developer-select are
+    populated via GET /api/games/distinct/:kind (cached).
+  - #goty-year filters GOTY results; #add-goty-btn opens the modal.
+  - #games-grid receives rendered game cards.
+  - #pager is injected after #games-grid by renderPager().
+
+  Accessibility:
+  - Roles and aria-* attributes keep the UI screen-reader friendly.
+  - aria-live regions announce result count/updates politely.
+  ===========================================================
+-->
 <html lang="en" data-color-scheme="dark">
 <head>
   <meta charset="utf-8" />
+  <!-- Responsive viewport for mobile-first layout -->
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Steam Games</title>
 
+  <!-- Favicon and main stylesheet -->
   <link rel="icon" href="/favicon.ico" />
   <link rel="stylesheet" href="/css/styles.css" />
 </head>
 <body>
   <div class="app-container">
-    <!-- Header -->
+    <!-- ========================= Header (brand + nav + quick filters) ========================= -->
     <header class="header">
       <div class="header-content">
         <div class="header-left">
+          <!-- App logo/title (purely visual) -->
           <div class="logo">
             <h1>STEAM GAMES</h1>
           </div>
 
-          <!-- Main nav -->
+          <!--
+            Main nav:
+            - Buttons use data-category so JS can read which logical "tab" is active.
+            - JS toggles the "active" class and re-runs runSearch().
+            - Categories:
+              • all              -> default search
+              • favorites        -> appids loaded from localStorage per profile
+              • recommendations  -> backend recommends based on current favorites
+              • goty             -> GOTY-specific filters and modal available
+          -->
           <nav class="main-nav" aria-label="Main categories">
             <button class="nav-btn active" data-category="all" type="button">All Games</button>
             <button class="nav-btn" data-category="favorites" type="button">Favorites</button>
@@ -28,13 +69,23 @@
         </div>
 
         <div class="header-right">
-          <!-- Search -->
+          <!--
+            Search box:
+            - JS listens to #search-input (debounced) and updates filters.search.
+            - role="search" improves semantics for assistive tech.
+          -->
           <div class="search-container" role="search">
             <input id="search-input" type="search" placeholder="Search games or developers..." aria-label="Search" />
             <span class="search-icon">🔎</span>
           </div>
 
-          <!-- Profile switcher -->
+          <!--
+            Profile switcher:
+            - The <select> initial "selected" is a visual default.
+            - On load, JS replaces it with CURRENT_PROFILE from localStorage
+              and persists any change under PROFILE_KEY, then reloads the page
+              so backend data and UI tabs reflect the new profile.
+          -->
           <div class="profile-switcher" title="Current profile">
             <label for="profile-select">Profile:</label>
             <select id="profile-select" class="form-control">
@@ -44,7 +95,11 @@
             </select>
           </div>
 
-          <!-- Platforms quick filters -->
+          <!--
+            Platforms quick filters:
+            - Each button toggles .active and contributes to filters.platforms.
+            - data-platform ∈ {"windows","mac","linux"} — read by getActivePlatforms().
+          -->
           <div class="platform-filters" aria-label="Platforms">
             <button class="platform-btn" data-platform="windows" title="Windows" type="button">🪟</button>
             <button class="platform-btn" data-platform="mac" title="macOS" type="button">🍎</button>
@@ -54,9 +109,11 @@
       </div>
     </header>
 
-    <!-- Secondary filters bar -->
+    <!-- ========================= Secondary filters bar =========================
+         All controls here are read by the JS (get* helpers) to assemble filters. -->
     <section class="secondary-bar" aria-label="Filters">
       <div class="secondary-content">
+        <!-- Sort order (maps to getSortValue() -> filters.sort) -->
         <div class="filter-group">
           <label for="sort-select">Sort by:</label>
           <select id="sort-select" class="form-control">
@@ -70,6 +127,9 @@
           </select>
         </div>
 
+        <!-- Genre filter:
+             - Options are populated at runtime from /api/games/distinct/genres.
+             - For "kid" profile, JS additionally hides adult genres client-side. -->
         <div class="filter-group">
           <label for="genre-select">Genre:</label>
           <select id="genre-select" class="form-control">
@@ -77,6 +137,7 @@
           </select>
         </div>
 
+        <!-- Language filter (populated from /distinct/languages) -->
         <div class="filter-group">
           <label for="language-select">Language:</label>
           <select id="language-select" class="form-control">
@@ -84,6 +145,7 @@
           </select>
         </div>
 
+        <!-- Multiplayer mode (single/multi) -->
         <div class="filter-group">
           <label for="multiplayer-select">Player Mode:</label>
           <select id="multiplayer-select" class="form-control">
@@ -93,6 +155,7 @@
           </select>
         </div>
 
+        <!-- Developer list (populated from /distinct/developers; trimmed, unique, capped) -->
         <div class="filter-group" style="min-width:260px; flex:1">
           <label for="developer-select">Developer:</label>
           <select id="developer-select" class="form-control">
@@ -100,7 +163,11 @@
           </select>
         </div>
 
-        <!-- Price range -->
+        <!--
+          Price range sliders (min/max):
+          - JS keeps min <= max, updates the visible label #price-value,
+            and triggers runSearch() on change.
+        -->
         <div class="filter-group" style="min-width:260px">
           <label>Price Range: <span id="price-value">0-50</span></label>
           <div class="price-range" aria-label="Price range">
@@ -109,7 +176,13 @@
           </div>
         </div>
 
-        <!-- GOTY specific controls (shown only in the GOTY tab by JS) -->
+        <!--
+          GOTY-only controls:
+          - These blocks are hidden by default and shown by JS when the
+            active category is "goty" (see setCategoryActive()).
+          - #goty-year filters existing GOTY entries.
+          - #add-goty-btn opens a modal with typeahead to set a GOTY.
+        -->
         <div class="filter-group goty-filter" style="display:none; min-width:220px;">
           <label for="goty-year">GOTY year filter:</label>
           <select id="goty-year" class="form-control">
@@ -122,8 +195,12 @@
           <button id="add-goty-btn" class="btn btn--primary" type="button">Add GOTY</button>
         </div>
 
- 
-
+        <!--
+          Recommendations seed (optional extension):
+          - This input (French label) can be used to specify a seed appid.
+          - Currently hidden (display:none). You could show it when
+            category === "recommendations" if you want to support manual seeding.
+        -->
         <div class="filter-group recos-filter" style="display:none; min-width:240px;">
           <label for="seed-appid">Jeu de référence (appid) :</label>
           <input id="seed-appid" class="form-control" type="text" placeholder="ex: 1026420" />
@@ -131,33 +208,70 @@
       </div>
     </section>
 
-    <!-- Main content -->
+    <!-- ============================== Main content ============================== -->
     <main class="main-content">
       <div class="content-header">
+        <!-- Title can be updated by JS when categories change -->
         <h2 id="content-title">All Games</h2>
         <div class="content-actions">
+          <!-- Updated by renderCount(n) after each search -->
           <span id="results-count">0 games found</span>
         </div>
       </div>
 
+      <!--
+        Global loading overlay:
+        - setLoading(true/false) toggles display.
+        - aria-hidden on spinner is okay as text is also present.
+      -->
       <div id="loading" class="loading" style="display:none;">
         <div class="spinner" aria-hidden="true"></div>
         <div>Loading…</div>
       </div>
 
+      <!--
+        "No results" empty state:
+        - showNoResults(true/false) toggles visibility.
+        - JS may also inject a custom message for Recommendations when no favorites exist.
+      -->
       <div id="no-results" class="no-results" style="display:none;">
         <div class="no-results-icon">🎮</div>
         <h3>No games found</h3>
         <p>Try adjusting your filters or search terms.</p>
       </div>
 
+      <!--
+        Results grid:
+        - renderGames(items) fills this container with card HTML.
+        - aria-live="polite" lets screen readers know content changed
+          without interrupting the user; aria-busy toggling is optional.
+      -->
       <div id="games-grid" class="games-grid" aria-live="polite" aria-busy="false"></div>
     </main>
   </div>
 
+  <!--
+    Toast container:
+    - toast(msg) appends transient messages here.
+    - aria-live/aria-atomic make screen readers announce them.
+  -->
   <div id="toaster" class="toaster" aria-live="polite" aria-atomic="true"></div>
 
+  <!--
+    Main JS bundle:
+    - Contains all event wiring, search flow, GOTY modal, favorites,
+      pagination, and distinct lists loading.
+    - 'defer' ensures the script runs after parsing HTML.
+  -->
   <script src="/js/filters.js" defer></script>
+
+  <!--
+    Inline helper:
+    - Populates the GOTY year <select> with [currentYear..1990]
+      on DOMContentLoaded so it's immediately available if user
+      lands directly on the GOTY tab.
+    - The main JS also reads #goty-year to filter results.
+  -->
   <script>
     // Fill GOTY year filter on load
     document.addEventListener("DOMContentLoaded", () => {
