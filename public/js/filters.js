@@ -4,20 +4,25 @@ function el(id){ return document.getElementById(id); }
 function qs(sel){ return document.querySelector(sel); }
 function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
 
+
 // === "simulated users" state ===
 const PROFILE_KEY = "activeProfile";
 const PROFILES = ["kid", "person1", "person2"];
 let CURRENT_PROFILE = localStorage.getItem(PROFILE_KEY) || "person1";
 
+
 // Genres hidden for kid profile (client-side safety)
 const BAD_GENRES = new Set(["Violent", "Sexual Content", "Nudity", "Gore"]);
+
 
 // favorites are stored per profile in localStorage using this key
 const FAV_KEY_BASE = "steamFavs";
 const favKey = () => `${FAV_KEY_BASE}:${CURRENT_PROFILE}`;
 
+
 // distinct cache (keyed by `${kind}:${profile}`)
 const DISTINCT_CACHE = Object.create(null);
+
 
 // === backend helpers ===
 async function apiSearch(payload, { signal } = {}){
@@ -33,6 +38,7 @@ async function apiSearch(payload, { signal } = {}){
 async function getDistinct(kind){
   const cacheKey = `${kind}:${CURRENT_PROFILE}`;
   if (DISTINCT_CACHE[cacheKey]) return DISTINCT_CACHE[cacheKey];
+
 
   // Include current profile so backend applies kid filters server-side
   const res = await fetch(`/api/games/distinct/${kind}?profile=${encodeURIComponent(CURRENT_PROFILE)}`);
@@ -63,6 +69,7 @@ async function apiUnsetGoty({ year, appid, profile } = {}){
   if(!res.ok) throw new Error("http "+res.status);
   return res.json();
 }
+
 
 /* -------------------------------------------------------------------------- */
 /* favorites (localStorage) — per-profile                                     */
@@ -96,10 +103,17 @@ function toggleFav(appid){
   }
   const catBtn = document.querySelector(".main-nav .nav-btn.active");
   const cat = catBtn ? catBtn.getAttribute("data-category") : "all";
-  if (cat === "favorites") {
+  
+  // MODIFICADO: Trigger search for both favorites AND recommendations
+  if (cat === "favorites" || cat === "recommendations") {
+    // Reset to page 1 and refresh
+    state.page = 1;
+    state.lastKey = ""; // Force refresh by clearing cache
     setTimeout(runSearch, 60);
   }
 }
+
+
 
 function toast(msg){
   const t = el("toaster");
@@ -111,6 +125,7 @@ function toast(msg){
   setTimeout(()=>{ item.classList.add("show"); }, 20);
   setTimeout(()=>{ item.classList.remove("show"); item.remove(); }, 2000);
 }
+
 
 // === UI: states ===
 function setLoading(on){
@@ -125,6 +140,7 @@ function renderCount(n){
   const r = el("results-count");
   if(r) r.textContent = `${n} games found`;
 }
+
 
 /* ---------- Formatting helpers ---------- */
 function formatPrice(v){
@@ -179,10 +195,12 @@ function headerSrc(g){
   `);
 }
 
+
 function scrollToGridTop(){
   const anchor = el("content-title") || el("games-grid") || document.body;
   anchor.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
 
 /* ---------- Pagination state ---------- */
 const PAGELIMIT_DEFAULT = 40;
@@ -196,6 +214,7 @@ const state = {
 function buildKey(filters, sort){
   return JSON.stringify({ filters, sort });
 }
+
 
 /* Pager */
 function ensurePager() {
@@ -214,10 +233,12 @@ function renderPager() {
   const pager = el("pager");
   if (!pager) return;
 
+
   const { page, limit, total } = state;
   const pages = total ? Math.max(1, Math.ceil(total / Math.max(1, limit))) : 1;
   const from  = total ? ((page - 1) * limit + 1) : 0;
   const to    = total ? Math.min(page * limit, total) : 0;
+
 
   pager.innerHTML = `
     <div class="pager__row">
@@ -237,6 +258,7 @@ function renderPager() {
     </div>
   `;
 
+
   const go = (p) => {
     const target = Math.min(Math.max(1, p), pages);
     if (target !== state.page) {
@@ -255,14 +277,17 @@ function renderPager() {
   });
 }
 
+
 /* -------------------------------------------------------------------------- */
 /* GOTY: Modal + typeahead suggestions                                        */
 /* -------------------------------------------------------------------------- */
 let gotySelection = null; // { appid, name }
 
+
 function ensureGotyModal(){
   let m = el("goty-modal");
   const needsBuild = !m || !m.querySelector("#goty-typeahead");
+
 
   if (!m) {
     m = document.createElement("div");
@@ -278,6 +303,7 @@ function ensureGotyModal(){
           <button class="modal-close" aria-label="Close">×</button>
         </div>
 
+
         <div class="modal-body">
           <div class="form-group">
             <label for="goty-typeahead">Search game</label>
@@ -288,11 +314,13 @@ function ensureGotyModal(){
             </div>
           </div>
 
+
           <div class="form-group">
             <label for="goty-year-select">Year</label>
             <select id="goty-year-select" class="form-control"></select>
           </div>
         </div>
+
 
         <div class="modal-footer">
           <button id="goty-cancel" class="btn btn--secondary">Cancel</button>
@@ -301,21 +329,26 @@ function ensureGotyModal(){
       </div>
     `;
 
+
     const close = () => m.classList.add("hidden");
     m.querySelector(".modal-close").addEventListener("click", close);
     m.querySelector("#goty-cancel").addEventListener("click", close);
     m.addEventListener("click", (e)=>{ if(e.target === m) close(); });
+
 
     const ySel = m.querySelector("#goty-year-select");
     const nowY = new Date().getFullYear();
     const years = Array.from({length: nowY - 1989}, (_,i)=> nowY - i);
     ySel.innerHTML = years.map(y => `<option value="${y}">${y}</option>`).join("");
 
+
     const input = m.querySelector("#goty-typeahead");
     const list  = m.querySelector("#goty-suggest");
     const save  = m.querySelector("#goty-save");
 
+
     input.readOnly = false; input.disabled = false; input.style.pointerEvents = "auto";
+
 
     const setSelection = (game) => {
       gotySelection = game ? { appid: String(game.appid), name: game.name } : null;
@@ -324,6 +357,7 @@ function ensureGotyModal(){
       qsa("#goty-suggest .item").forEach(li => li.classList.remove("active"));
       if (game) list.querySelector(`[data-appid="${game.appid}"]`)?.classList.add("active");
     };
+
 
     let debounce = null;
     input.addEventListener("input", () => {
@@ -338,12 +372,15 @@ function ensureGotyModal(){
       debounce = setTimeout(runGotyTypeahead, 220);
     });
 
+
     input.addEventListener("keydown", (e) => {
       const items = qsa("#goty-suggest .item");
       if (!items.length) return;
 
+
       const current = list.querySelector(".item.focused");
       let idx = current ? items.indexOf(current) : -1;
+
 
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -367,6 +404,7 @@ function ensureGotyModal(){
       }
     });
 
+
     list.addEventListener("click", (e) => {
       const li = e.target.closest(".item");
       if (!li) return;
@@ -374,12 +412,13 @@ function ensureGotyModal(){
       list.classList.remove("open");
     });
 
+
     save.addEventListener("click", async () => {
       if (!gotySelection) return;
       const year = Number(ySel.value);
       try {
         await apiSetGoty(gotySelection.appid, year, CURRENT_PROFILE);
-        toast(`GOTY ${year} set to “${gotySelection.name}”`);
+        toast(`GOTY ${year} set to "${gotySelection.name}"`);
         m.classList.add("hidden");
         runSearch({ page: 1 });
       } catch (e) {
@@ -389,8 +428,10 @@ function ensureGotyModal(){
     });
   }
 
+
   return m;
 }
+
 
 async function runGotyTypeahead(){
   const m = el("goty-modal");
@@ -399,9 +440,11 @@ async function runGotyTypeahead(){
   const list  = m.querySelector("#goty-suggest");
   const q = (input.value || "").trim();
 
+
   list.innerHTML = "";
   list.classList.remove("open");
   if (!q) return;
+
 
   try{
     const payload = {
@@ -413,11 +456,13 @@ async function runGotyTypeahead(){
     const data = await apiSearch(payload);
     const items = data.items || [];
 
+
     if (!items.length) {
       list.innerHTML = `<div class="empty">No matches</div>`;
       list.classList.add("open");
       return;
     }
+
 
     list.innerHTML = items.map(g => `
       <div class="item" role="option" tabindex="-1"
@@ -434,19 +479,23 @@ async function runGotyTypeahead(){
   }
 }
 
+
 function openGotyModal(){
   gotySelection = null;
   const m = ensureGotyModal();
   m.classList.remove("hidden");
 
+
   const input = m.querySelector("#goty-typeahead");
   const list  = m.querySelector("#goty-suggest");
   const save  = m.querySelector("#goty-save");
+
 
   input.value = "";
   list.innerHTML = "";
   list.classList.remove("open");
   save.disabled = true;
+
 
   setTimeout(() => {
     input.readOnly = false;
@@ -456,6 +505,7 @@ function openGotyModal(){
   }, 0);
 }
 
+
 /* -------------------------------------------------------------------------- */
 /* Card + favorites + GOTY badge                                              */
 /* -------------------------------------------------------------------------- */
@@ -463,6 +513,7 @@ function gameCardHTML(g){
   const appid  = g.appid || g._id || "";
   const fav    = isFav(appid);
   const isGoty = Number(g.goty_year) > 0;
+
 
   const priceStr  = formatPrice(g.price);
   const dateStr   = formatDate(g.release_date);
@@ -473,6 +524,7 @@ function gameCardHTML(g){
   const tagsStr   = safeTags(g.tags, 6);
   const desc      = g.short_description || g.about_the_game || g.detailed_description || "";
   const shots     = Array.isArray(g.screenshots) ? g.screenshots.slice(0,4) : [];
+
 
   return `
     <div class="game-card ${isGoty ? "is-goty" : ""}" data-appid="${appid}">
@@ -489,9 +541,11 @@ function gameCardHTML(g){
         </button>
       </div>
 
+
       <div class="meta">
         <h4 class="title">${g.name || "Untitled"}</h4>
         ${genresStr ? `<div class="sub">${genresStr}</div>` : ""}
+
 
         <div class="badges">
           ${platformsIcons(g)}
@@ -500,10 +554,12 @@ function gameCardHTML(g){
           ${g.recommendations ? `<span class="badge" title="Recommendations">👍 ${g.recommendations}</span>` : ""}
         </div>
 
+
         <div class="row">
           <span class="price ${g.price === 0 ? "free":""}">${priceStr}</span>
           <span class="date">${dateStr}</span>
         </div>
+
 
         <div class="fine">
           ${langsStr ? `<div>Lang: ${langsStr}</div>` : ""}
@@ -512,6 +568,7 @@ function gameCardHTML(g){
           ${tagsStr ? `<div>Tags: ${tagsStr}</div>` : ""}
           ${g.website ? `<a href="${g.website}" target="_blank" rel="noopener">Website ↗</a>` : ""}
         </div>
+
 
         ${desc || (shots && shots.length)
           ? `<details>
@@ -525,9 +582,11 @@ function gameCardHTML(g){
   `;
 }
 
+
 function renderGames(items){
   const grid = el("games-grid");
   if(!grid) return;
+
 
   if(!items || !items.length){
     grid.innerHTML = "";
@@ -537,10 +596,12 @@ function renderGames(items){
   showNoResults(false);
   grid.innerHTML = items.map(g => gameCardHTML(g)).join("");
 
+
   // favorites
   qsa(".fav-btn").forEach(btn => {
     btn.addEventListener("click", () => toggleFav(btn.dataset.appid));
   });
+
 
   // remove GOTY from badge
   qsa(".goty-remove").forEach(btn => {
@@ -555,6 +616,7 @@ function renderGames(items){
     });
   });
 }
+
 
 // === read UI values ===
 function getActiveCategory(){
@@ -579,6 +641,7 @@ function getPriceMin(){ return Number(el("price-min")?.value || 0); }
 function getPriceMax(){ return Number(el("price-max")?.value || 50); }
 function getGOTYYear(){ return el("goty-year")?.value || ""; }
 
+
 function updatePriceLabel(){
   const span = el("price-value");
   if(!span) return;
@@ -592,14 +655,17 @@ function setCategoryActive(targetBtn){
   qsa(".main-nav .nav-btn").forEach(b => b.classList.remove("active"));
   targetBtn.classList.add("active");
 
+
   const cat = getActiveCategory();
   const show = (cat === "goty");
   qsa(".goty-filter").forEach(block => {
     block.style.display = show ? "block" : "none";
   });
 
+
   runSearch();
 }
+
 
 // Helper: build <option> list safely
 function buildOptionsHTML(values, placeholder){
@@ -608,11 +674,13 @@ function buildOptionsHTML(values, placeholder){
   return opts.join("");
 }
 
+
 // Load distinct lists (genres/languages/developers) in parallel
 async function loadDistincts(){
   const selGenre = el("genre-select");
   const selLang  = el("language-select");
   const selDev   = el("developer-select");
+
 
   try{
     const [gRes, lRes, dRes] = await Promise.all([
@@ -621,23 +689,28 @@ async function loadDistincts(){
       getDistinct("developers")
     ]);
 
+
     if (selGenre) {
       let vals = (gRes.items || []).filter(Boolean);
+
 
       // Client-side guard: hide adult genres for kid profile
       if (CURRENT_PROFILE === "kid") {
         vals = vals.filter(v => !BAD_GENRES.has(String(v)));
       }
 
+
       vals.sort((a,b)=>String(a).localeCompare(String(b)));
       selGenre.innerHTML = buildOptionsHTML(vals, "All Genres");
     }
+
 
     if (selLang) {
       const vals = (lRes.items || []).filter(Boolean)
         .sort((a,b)=>String(a).localeCompare(String(b)));
       selLang.innerHTML = buildOptionsHTML(vals, "All Languages");
     }
+
 
     if (selDev) {
       let vals = (dRes.items || []).filter(Boolean);
@@ -653,8 +726,10 @@ async function loadDistincts(){
   }
 }
 
+
 let searchTimer = null;
 let CURRENT_SEARCH_CTRL = null;
+
 
 async function runSearch({ page } = {}){
   try{
@@ -704,7 +779,7 @@ async function runSearch({ page } = {}){
       withTotal: true
     };
 
-    // favorites: if empty, short-circuit
+    // MODIFICADO: Handle both favorites AND recommendations
     if (payload.filters && payload.filters.category === "favorites") {
       const favs = loadFavs();
       if (!favs.length) {
@@ -714,6 +789,38 @@ async function runSearch({ page } = {}){
         renderPager();
         return;
       }
+      payload.filters.appids = favs;
+    }
+
+    // NUEVO: Handle recommendations - always send fresh favorites list
+    if (payload.filters && payload.filters.category === "recommendations") {
+      const favs = loadFavs();
+      
+      if (!favs.length) {
+        // No favorites - show special message
+        state.total = 0; 
+        state.hasMore = false;
+        renderCount(0);
+        renderGames([]);
+        showNoResults(true);
+        
+        const noRes = el("no-results");
+        if (noRes) {
+          noRes.innerHTML = `
+            <div style="text-align: center; padding: 2rem;">
+              <h3>No Favorites Yet</h3>
+              <p>Add games to your favorites to get personalized recommendations!</p>
+              <p style="font-size: 2rem; margin: 1rem 0;">⭐ 🎮 ⭐</p>
+            </div>
+          `;
+        }
+        
+        renderPager();
+        setLoading(false);
+        return;
+      }
+      
+      // CRITICAL: Always send fresh favorites list for recommendations
       payload.filters.appids = favs;
     }
 
@@ -740,6 +847,8 @@ async function runSearch({ page } = {}){
   }
 }
 
+
+
 document.addEventListener("DOMContentLoaded", () => {
   // init profile selector
   const sel = el("profile-select");
@@ -747,14 +856,17 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!PROFILES.includes(CURRENT_PROFILE)) CURRENT_PROFILE = "person1";
     sel.value = CURRENT_PROFILE;
 
+
     sel.addEventListener("change", () => {
       const p = sel.value;
       if (!PROFILES.includes(p)) return;
+
 
       // Persist the chosen profile
       CURRENT_PROFILE = p;
       localStorage.setItem(PROFILE_KEY, CURRENT_PROFILE);
       toast(`Profile: ${p}`);
+
 
       // Force a full page refresh so every view (including GOTY tab)
       // re-renders with the new profile's data and server state.
@@ -762,24 +874,29 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+
   qsa(".main-nav .nav-btn").forEach(btn => {
     btn.addEventListener("click", () => setCategoryActive(btn));
   });
+
 
   el("search-input")?.addEventListener("input", () => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(runSearch, 300);
   });
 
+
   qsa(".platform-btn").forEach(btn => {
     btn.addEventListener("click", () => togglePlatform(btn));
   });
+
 
   el("sort-select")?.addEventListener("change", runSearch);
   el("genre-select")?.addEventListener("change", runSearch);
   el("language-select")?.addEventListener("change", runSearch);
   el("multiplayer-select")?.addEventListener("change", runSearch);
   el("developer-select")?.addEventListener("change", runSearch);
+
 
   const pmin = el("price-min");
   const pmax = el("price-max");
@@ -794,8 +911,10 @@ document.addEventListener("DOMContentLoaded", () => {
   pmin?.addEventListener("change", runSearch);
   pmax?.addEventListener("change", runSearch);
 
+
   el("goty-year")?.addEventListener("change", runSearch);
   el("add-goty-btn")?.addEventListener("click", openGotyModal);
+
 
   Promise.resolve()
     .then(loadDistincts)

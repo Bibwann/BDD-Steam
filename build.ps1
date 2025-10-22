@@ -3,8 +3,8 @@ Param(
   [switch]$Logs = $true
 )
 
-Write-Host "==> Down + cleanup des orphelins" -ForegroundColor Cyan
-docker compose down --remove-orphans
+Write-Host "==> Down + cleanup des orphelins ET des volumes" -ForegroundColor Cyan
+docker compose down --remove-orphans -v
 
 Write-Host "==> Build des images" -ForegroundColor Cyan
 if ($NoCache) {
@@ -23,7 +23,3 @@ if ($Logs) {
   Write-Host "`n==> Logs du service 'site' (Ctrl+C pour quitter)" -ForegroundColor Cyan
   docker compose logs -f site
 }
-
-Write-Host "`nTips:" -ForegroundColor Yellow
-Write-Host "  - Vérif fichier: docker exec -it bdd-steam-site-1 sh -c 'ls -la /app/public/js/filters.js'"
-Write-Host "  - Test HTTP:     curl http://localhost:3000/"
