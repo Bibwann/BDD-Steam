@@ -1,4 +1,7 @@
 // src/routes/games.js
+// Express router that powers all game search, distinct lists, GOTY integration,
+// recommendations, raw aggregation execution (with guardrails), and single-item fetches.
+// This module interacts with MongoDB through the Mongoose models Game and Goty.
 
 import { Router } from "express";
 import mongoose from "mongoose";
@@ -12,17 +15,17 @@ const router = Router();
 /* -------------------------------------------------------------------------- */
 
 /**
- * Escapes special regex characters in a string.
- * @param {string} s - The string to escape
- * @returns {string} - Escaped string safe for regex
+ * Escape RegExp metacharacters to safely embed arbitrary text inside regexes.
+ * @param {string} s - Raw user text or term.
+ * @returns {string} - Escaped string that can be safely used inside new RegExp().
  */
 function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * Mapping of base characters to their diacritic variants.
- * Used for accent-insensitive searches.
+ * Mapping from a base Latin letter to a string of common diacritic variants.
+ * Used to build accent-insensitive character classes for search inputs.
  */
 const DIACRITIC_MAP = {
   a: "aàáâäãåāăą",
@@ -44,19 +47,19 @@ const DIACRITIC_MAP = {
 };
 
 /**
- * Converts a string into a diacritic-insensitive regex pattern.
- * Example: "cafe" becomes "[cç][aàáâ][fḟ][eèéê]"
- * @param {string} source - The input string
- * @returns {string} - Regex pattern string
+ * Convert a plain string to a diacritic-insensitive regex pattern.
+ * Example: "cafe" -> "[cç][aàáâäãåāăą]f[eèéêëēĕėę]"
+ * - Letters with known diacritics become character classes.
+ * - Other characters are escaped literally.
+ * @param {string} source - Input text (e.g., search term).
+ * @returns {string} - Regex pattern string (not a RegExp object).
  */
 function toDiacriticRegex(source) {
   const chars = String(source).split("");
   const out = chars.map((ch) => {
     const low = ch.toLowerCase();
     if (DIACRITIC_MAP[low]) {
-      const cls = DIACRITIC_MAP[low].split("")
-        .map(escapeRegExp)
-        .join("");
+      const cls = DIACRITIC_MAP[low].split("").map(escapeRegExp).join("");
       return `[${cls}]`;
     }
     return escapeRegExp(ch);
@@ -65,467 +68,375 @@ function toDiacriticRegex(source) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Helper: Get kid safety filter conditions (FIXED FOR OBJECT TAGS)           */
+/* Helper: Kid-safety exclusion conditions (OBJECT TAGS FIX)                  */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Returns kid profile safety exclusion conditions.
- * CRITICAL FIX: Tags are stored as OBJECTS with keys, not arrays.
- * Structure: tags: { "Sexual Content": 100, "Nudity": 50, ... }
- * 
- * @returns {Object} - MongoDB $nor condition for kid safety
+ * Build a MongoDB condition that excludes adult/violent content for the "kid" profile.
+ *
+ * IMPORTANT SHAPE NOTE:
+ * - `tags` are stored as an OBJECT (e.g. { "Nudity": 100, "Violent": 50, ... }),
+ *   not as an array. We therefore check tag PRESENCE via dotted-path `$exists:true`.
+ *
+ * Coverage:
+ * - Excludes bad words across categories/genres (arrays of strings).
+ * - Excludes when any bad tag exists as a key in `tags` object.
+ * - Excludes when `steamspy_tags` (string or array) matches bad terms.
+ * - Excludes titles/developers/publishers containing problematic terms (regex).
+ * - Excludes by explicit age rating (required_age >= 18).
+ *
+ * Returned shape:
+ * - `{ $nor: [ ...conditions... ] }` so ANY of these signals will exclude a game.
+ *
+ * @returns {import("mongodb").Filter<unknown>} MongoDB NOR-based filter.
  */
 function getKidSafetyFilter() {
-  // Comprehensive list of inappropriate tags/categories
   const badTags = [
     // Explicit adult content
-    "Sexual Content", "Nudity", "Mature", "Adult", "NSFW", 
+    "Sexual Content", "Nudity", "Mature", "Adult", "NSFW",
     "Hentai", "Porn", "Erotic", "XXX", "Ecchi", "Loli",
+    // Soft signals that often accompany adult content
     "Dating Sim", "Romance", "Anime",
-    
     // Violence
     "Violent", "Gore", "Blood", "Brutal",
-    
-    // Visual Novel (often contains adult content)
+    // Often adult-heavy genre in this dataset
     "Visual Novel",
   ];
 
-  // Build $nor conditions array
   const norConditions = [];
 
-  // ========== CATEGORIES (array of strings) ==========
+  // CATEGORIES / GENRES (arrays of strings)
   norConditions.push({ categories: { $in: badTags } });
-
-  // ========== GENRES (array of strings) ==========
   norConditions.push({ genres: { $in: badTags } });
 
-  // ========== TAGS (OBJECT with keys) - THE CRITICAL FIX ==========
-  // Check if any bad tag exists as a KEY in the tags object
-  // Example: tags: { "Nudity": 100, "Sexual Content": 50 }
+  // TAGS (object): exclude if any bad tag is present as a key
   badTags.forEach(tag => {
     norConditions.push({ [`tags.${tag}`]: { $exists: true } });
   });
 
-  // ========== STEAMSPY_TAGS (can be string or array) ==========
-  const rxBadTags = new RegExp(
-    badTags.map(w => toDiacriticRegex(w)).join("|"),
-    "i"
-  );
+  // STEAMSPY_TAGS (string or array) — handle both equality and regex match
+  const rxBadTags = new RegExp(badTags.map(w => toDiacriticRegex(w)).join("|"), "i");
   norConditions.push({ steamspy_tags: { $in: badTags } });
   norConditions.push({ steamspy_tags: rxBadTags });
 
-  // ========== GAME TITLE ==========
+  // GAME TITLE (fuzzy)
   const badTitleWords = [
-    "Hentai", "Porn", "Sex", "Nude", "Nudity", "Erotic", 
-    "XXX", "NSFW", "Loli", "Ecchi", "Waifu", "Gore",
-    "Violent",
-    // Specific problematic game names
-    "Funbag", "Meltys", "NEKOMIMI", "Unlock Me",
-    "Deep Space Waifu", "Tower of Five Hearts", 
-    "K Station", "Kara no Shojo"
+    "Hentai", "Porn", "Sex", "Nude", "Nudity", "Erotic", "XXX", "NSFW",
+    "Loli", "Ecchi", "Waifu", "Gore", "Violent",
+    // Specific examples known to be adult-themed in some datasets
+    "Funbag", "Meltys", "NEKOMIMI", "Unlock Me", "Deep Space Waifu",
+    "Tower of Five Hearts", "K Station", "Kara no Shojo"
   ];
-  const rxBadName = new RegExp(
-    badTitleWords.map(w => toDiacriticRegex(w)).join("|"),
-    "i"
-  );
+  const rxBadName = new RegExp(badTitleWords.map(w => toDiacriticRegex(w)).join("|"), "i");
   norConditions.push({ name: rxBadName });
 
-  // ========== DEVELOPERS ==========
+  // DEVELOPERS (array) — exclude by literal membership or fuzzy regex
   const badDevTerms = [
-    "NSFW", "Hentai", "Adult", "Erotic", 
-    "Waffle", "MangaGamer", "TsukiWare", 
+    "NSFW", "Hentai", "Adult", "Erotic",
+    "Waffle", "MangaGamer", "TsukiWare",
     "Remtairy", "Kagura Games", "Neko Climax",
     "Maya Games", "Perpetual FX Creative"
   ];
-  const rxBadDev = new RegExp(
-    badDevTerms.map(w => toDiacriticRegex(w)).join("|"),
-    "i"
-  );
+  const rxBadDev = new RegExp(badDevTerms.map(w => toDiacriticRegex(w)).join("|"), "i");
   norConditions.push({ developers: { $in: badDevTerms } });
   norConditions.push({ developers: rxBadDev });
 
-  // ========== PUBLISHERS ==========
-  const badPubTerms = [
-    "MangaGamer", "Kagura Games", "Maya Games", 
-    "Remtairy", "Neko Climax"
-  ];
-  const rxBadPub = new RegExp(
-    badPubTerms.map(w => toDiacriticRegex(w)).join("|"),
-    "i"
-  );
+  // PUBLISHERS (array)
+  const badPubTerms = ["MangaGamer", "Kagura Games", "Maya Games", "Remtairy", "Neko Climax"];
+  const rxBadPub = new RegExp(badPubTerms.map(w => toDiacriticRegex(w)).join("|"), "i");
   norConditions.push({ publishers: { $in: badPubTerms } });
   norConditions.push({ publishers: rxBadPub });
 
-  // ========== AGE RATING ==========
+  // AGE RATING (numeric)
   norConditions.push({ required_age: { $gte: 18 } });
 
   return { $nor: norConditions };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Helper: Extract characteristics from favorite games for recommendations    */
+/* Helper: Extract favorite-derived characteristics for recommendations       */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Analyzes favorite games to extract common characteristics.
- * Used to build personalized recommendations based on user preferences.
- * FOR KID PROFILE: Only extracts characteristics from kid-safe favorites.
- * 
- * @param {Array<string>} appids - Array of Steam app IDs from favorites
- * @param {string} profile - Profile ID (kid, person1, person2)
- * @returns {Object|null} - Characteristics object or null if no data
+ * Inspect the user's favorite games and compute preference signals:
+ * - Top genres / languages / developers / categories (by frequency)
+ * - Price stats (average, min, max)
+ *
+ * For the "kid" profile, the analysis itself is restricted to kid-safe favorites.
+ *
+ * @param {Array<string>} appids - Favorite Steam app IDs (strings or coercible).
+ * @param {string} [profile="person1"] - Active profile id; affects kid-safe filtering.
+ * @returns {Promise<{
+ *   topGenres: string[],
+ *   topLanguages: string[],
+ *   topDevelopers: string[],
+ *   topCategories: string[],
+ *   avgPrice: number|null,
+ *   minPrice: number|null,
+ *   maxPrice: number|null
+ * } | null>}
  */
 async function getFavoriteCharacteristics(appids, profile = "person1") {
   if (!Array.isArray(appids) || appids.length === 0) return null;
 
-  // Build query with kid safety filter if needed
   const query = { appid: { $in: appids.map(String) } };
-  
-  // CRITICAL: If kid profile, only analyze kid-safe favorites
+  // For kid profile: ensure even the favorites inspected are kid-safe
   if (String(profile) === "kid") {
     Object.assign(query, getKidSafetyFilter());
   }
 
-  // Fetch favorite games with relevant fields only
   const favorites = await Game.find(query)
     .select("genres supported_languages developers categories price")
     .lean();
 
   if (favorites.length === 0) return null;
 
-  // Initialize aggregation maps
+  // Frequency maps
   const genresMap = {};
   const languagesMap = {};
   const developersMap = {};
   const categoriesMap = {};
   const prices = [];
 
-  // Aggregate characteristics from all favorite games
   favorites.forEach(game => {
-    // Count genre occurrences
-    if (Array.isArray(game.genres)) {
-      game.genres.forEach(g => {
-        genresMap[g] = (genresMap[g] || 0) + 1;
-      });
-    }
-
-    // Count language occurrences
-    if (Array.isArray(game.supported_languages)) {
-      game.supported_languages.forEach(l => {
-        languagesMap[l] = (languagesMap[l] || 0) + 1;
-      });
-    }
-
-    // Count developer occurrences
-    if (Array.isArray(game.developers)) {
-      game.developers.forEach(d => {
-        developersMap[d] = (developersMap[d] || 0) + 1;
-      });
-    }
-
-    // Count category occurrences
-    if (Array.isArray(game.categories)) {
-      game.categories.forEach(c => {
-        categoriesMap[c] = (categoriesMap[c] || 0) + 1;
-      });
-    }
-
-    // Collect prices for range analysis
-    if (game.price != null) {
-      prices.push(Number(game.price));
-    }
+    if (Array.isArray(game.genres)) game.genres.forEach(g => { genresMap[g] = (genresMap[g] || 0) + 1; });
+    if (Array.isArray(game.supported_languages)) game.supported_languages.forEach(l => { languagesMap[l] = (languagesMap[l] || 0) + 1; });
+    if (Array.isArray(game.developers)) game.developers.forEach(d => { developersMap[d] = (developersMap[d] || 0) + 1; });
+    if (Array.isArray(game.categories)) game.categories.forEach(c => { categoriesMap[c] = (categoriesMap[c] || 0) + 1; });
+    if (game.price != null) prices.push(Number(game.price));
   });
 
-  // Extract top 5 most frequent genres
-  const topGenres = Object.entries(genresMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([genre]) => genre);
+  const topGenres = Object.entries(genresMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([g])=>g);
+  const topLanguages = Object.entries(languagesMap).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([l])=>l);
+  const topDevelopers = Object.entries(developersMap).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([d])=>d);
+  const topCategories = Object.entries(categoriesMap).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([c])=>c);
 
-  // Extract top 3 most frequent languages
-  const topLanguages = Object.entries(languagesMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([lang]) => lang);
+  const avgPrice = prices.length ? prices.reduce((s,p)=>s+p,0) / prices.length : null;
+  const minPrice = prices.length ? Math.min(...prices) : null;
+  const maxPrice = prices.length ? Math.max(...prices) : null;
 
-  // Extract top 3 most frequent developers
-  const topDevelopers = Object.entries(developersMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([dev]) => dev);
-
-  // Extract top 3 most frequent categories
-  const topCategories = Object.entries(categoriesMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([cat]) => cat);
-
-  // Calculate average price from favorites
-  const avgPrice = prices.length > 0
-    ? prices.reduce((sum, p) => sum + p, 0) / prices.length
-    : null;
-
-  // Calculate price range bounds
-  const minPrice = prices.length > 0 ? Math.min(...prices) : null;
-  const maxPrice = prices.length > 0 ? Math.max(...prices) : null;
-
-  return {
-    topGenres,
-    topLanguages,
-    topDevelopers,
-    topCategories,
-    avgPrice,
-    minPrice,
-    maxPrice,
-  };
+  return { topGenres, topLanguages, topDevelopers, topCategories, avgPrice, minPrice, maxPrice };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Utils: Build MongoDB $match object from filters                            */
+/* Utils: translate frontend filters to a MongoDB $match                      */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Builds a MongoDB $match object for aggregation pipelines.
- * Applies all user-selected filters including kid profile safety exclusions.
- * 
- * @param {Object} f - Filter object from frontend
- * @returns {Object} - MongoDB $match condition
+ * Convert the filter object sent by the frontend into a MongoDB condition.
+ * - Applies text search (accent-insensitive) across name/developers/genres.
+ * - Applies category presets (favorites/best/recommendations placeholder).
+ * - Applies platform/genre/language/developer/multiplayer/price constraints.
+ * - If profile === "kid", injects the kid-safety exclusion block.
+ *
+ * NOTE: "recommendations" is handled elsewhere; here we only avoid filtering it out.
+ *
+ * @param {Record<string, any>} f - Raw filters from the client.
+ * @returns {import("mongodb").Filter<unknown>} - Combined $and/$or tree for $match.
  */
 function buildMatch(f = {}) {
   const and = [];
 
-  // Text search across name, developers, and genres (diacritic-insensitive)
+  // Text search across several fields, accent-insensitive using our char-class builder
   if (f.search && String(f.search).trim()) {
     const pattern = toDiacriticRegex(String(f.search).trim());
     const rx = new RegExp(pattern, "i");
     and.push({ $or: [{ name: rx }, { developers: rx }, { genres: rx }] });
   }
 
-  // Quick category filters
+  // Category presets that translate to simple filters (non-recommendations)
   switch (f.category) {
     case "favorites":
-      // Only apply if no appids provided (legacy support)
+      // If the frontend already provided explicit appids, we won't rely on a boolean flag.
       if (!(Array.isArray(f.appids) && f.appids.length)) {
         and.push({ favorite: true });
       }
       break;
     case "best":
-      // High-rated games (user score >= 80)
       and.push({ user_score: { $gte: 80 } });
       break;
     case "recommendations":
-      // Handled separately with scoring logic
+      // Scoring-based; handled in a separate pipeline
       break;
-    // NOTE: "goty" category is filtered AFTER the $lookup stage
+    // "goty" is filtered after a $lookup joins GOTY data (see gotyJoinStages)
     default:
       break;
   }
 
-  // Platform filters (Windows, Mac, Linux) - OR logic
+  // Platforms (OR across selected platforms)
   const ors = [];
   if (f.platforms?.windows || f.windows === "1") ors.push({ windows: true });
   if (f.platforms?.mac || f.mac === "1") ors.push({ mac: true });
   if (f.platforms?.linux || f.linux === "1") ors.push({ linux: true });
   if (ors.length) and.push({ $or: ors });
 
-  // Genre filter (must be present in genres array)
+  // Genre / Language dropdowns
   if (f.genre) and.push({ genres: f.genre });
-
-  // Language filter (must be present in supported_languages array)
   if (f.language) and.push({ supported_languages: f.language });
 
-  // Favorites by appids (frontend sends array of favorite game IDs)
+  // Explicit favorites by appids (used by favorites & recommendations)
   if (Array.isArray(f.appids) && f.appids.length) {
     const ids = f.appids.map(v => String(v));
     and.push({ appid: { $in: ids } });
   }
 
-  // Multiplayer mode filters
+  // Multiplayer mode (Steam categories naming)
   if (f.multiplayer === "single") and.push({ categories: "Single-player" });
-  if (f.multiplayer === "multi") and.push({ categories: "Multi-player" });
+  if (f.multiplayer === "multi")  and.push({ categories: "Multi-player" });
 
-  // Developer filter (exact match or diacritic-insensitive regex)
+  // Developer filter supports exact match OR diacritic-insensitive regex
   if (f.developer) {
     const dev = String(f.developer).trim();
     const devPattern = new RegExp(toDiacriticRegex(dev), "i");
     and.push({ $or: [{ developers: dev }, { developers: devPattern }] });
   }
 
-  // Price range filter (always bounded, defaults: 0 - 999999)
+  // Price bounds (always enforced; the frontend provides defaults)
   const min = f.priceMin != null ? Number(f.priceMin) : 0;
   const max = f.priceMax != null ? Number(f.priceMax) : 999999;
   and.push({ price: { $gte: min, $lte: max } });
 
-  /* ------------------------ KID PROFILE SAFETY FILTER --------------------- */
-  /**
-   * When profile is "kid", exclude games with inappropriate content.
-   */
+  // Kid profile: apply global exclusions
   if (String(f.profile) === "kid") {
     and.push(getKidSafetyFilter());
   }
-  /* ----------------------------------------------------------------------- */
 
-  // Return combined match condition
-  if (and.length === 0) return {};
+  if (!and.length) return {};
   return and.length === 1 ? and[0] : { $and: and };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Build recommendation match - BALANCED VERSION                              */
+/* Build recommendation $match (requires overlap)                              */
 /* -------------------------------------------------------------------------- */
-/*
- * Builds recommendation match - GENRE-FOCUSED VERSION
- * REQUIRES at least one genre match for recommendations
+
+/**
+ * Construct a recommendation-oriented $match:
+ * - Requires at least one overlapping genre with the favorite-derived profile,
+ *   falling back to categories if no genres are available.
+ * - Excludes already-favorited appids.
+ * - Applies platform and kid-safety constraints as needed.
+ *
+ * @param {Record<string, any>} f - Filters with at least `appids` and `profile`.
+ * @returns {Promise<import("mongodb").Filter<unknown> | null>} - A match filter,
+ *          or null when we cannot produce meaningful recommendations (no favorites).
  */
 async function buildRecommendationMatch(f = {}) {
   const and = [];
 
   const favAppids = Array.isArray(f.appids) && f.appids.length ? f.appids : [];
   const profile = String(f.profile || "person1");
-  
-  if (favAppids.length === 0) {
-    return null;
-  }
+  if (!favAppids.length) return null;
 
-  // CRITICAL: Apply kid safety filter FIRST
+  // Kid safety first to prune the pool early
   if (profile === "kid") {
     and.push(getKidSafetyFilter());
   }
 
-  // Extract characteristics (kid-safe only for kid profile)
   const characteristics = await getFavoriteCharacteristics(favAppids, profile);
-  
   if (!characteristics) {
-    if (profile === "kid") {
-      return { $and: and };
-    }
+    // With kid profile, we can still return a basic safety-only match (very broad)
+    if (profile === "kid") return { $and: and };
     return null;
   }
 
-  // Exclude already favorited games
+  // Don't recommend what the user already likes
   and.push({ appid: { $nin: favAppids.map(String) } });
 
-  // CRITICAL FIX: Require AT LEAST ONE GENRE MATCH
-  // This ensures recommendations are actually similar
+  // Require some similarity: at least one genre (preferred) or category overlap
   if (characteristics.topGenres.length > 0) {
     and.push({ genres: { $in: characteristics.topGenres } });
-  } else {
-    // If no genres found, fall back to category matching
-    if (characteristics.topCategories.length > 0) {
-      and.push({ categories: { $in: characteristics.topCategories } });
-    }
+  } else if (characteristics.topCategories.length > 0) {
+    and.push({ categories: { $in: characteristics.topCategories } });
   }
 
-  // Platform filters
+  // Respect platform selections
   const ors = [];
   if (f.platforms?.windows || f.windows === "1") ors.push({ windows: true });
   if (f.platforms?.mac || f.mac === "1") ors.push({ mac: true });
   if (f.platforms?.linux || f.linux === "1") ors.push({ linux: true });
   if (ors.length) and.push({ $or: ors });
 
-  if (and.length === 0) return {};
+  if (!and.length) return {};
   return { $and: and };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Build scoring pipeline - BALANCED VERSION                                  */
+/* Build recommendation scoring ($addFields with weighted components)          */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Creates MongoDB aggregation stages to score games by similarity.
- * BALANCED: High weights for genres but doesn't eliminate games without genre match.
- * 
- * Scoring factors:
- * - Genre match: 100 points per match (HIGHEST PRIORITY)
- * - Category match: 30 points per match
- * - Developer match: 20 points per match
- * - Language match: 10 points per match
- * - Price similarity: 0-10 points
- * - User rating bonus: 0-5 points
- * 
- * @param {Array<string>} favAppids - Favorite game IDs
- * @param {Object} characteristics - Extracted characteristics object
- * @returns {Array} - MongoDB aggregation stages
+ * Create an $addFields stage that attaches per-document scores and a
+ * `recommendationScore` computed from weighted components. Higher is better.
+ *
+ * Components (weights chosen to emphasize genre similarity):
+ * - genreScore:     100 pts per overlapping genre
+ * - catScore:       30  pts per overlapping category
+ * - devScore:       20  pts per overlapping developer
+ * - langScore:      10  pts per overlapping language
+ * - priceScore:     0..10 based on closeness to average favorite price
+ * - rating bonus:   user_score / 20  (0..5 when user_score in 0..100)
+ *
+ * @param {Array<string>} favAppids - Not used in scoring here, but kept for parity/extension.
+ * @param {ReturnType<typeof getFavoriteCharacteristics>} characteristics - Extracted signals.
+ * @returns {Promise<Array<import("mongodb").Document>>} One or more $addFields stages.
  */
 async function buildRecommendationScoring(favAppids, characteristics) {
   if (!characteristics) return [];
 
   const scoreFields = {};
-  
-  // Score by genre overlap (count matching genres) - HIGHEST PRIORITY
+
+  // Overlap counts via $setIntersection with null-safe arrays
   if (characteristics.topGenres.length > 0) {
     scoreFields.genreScore = {
       $size: {
         $ifNull: [
-          {
-            $setIntersection: [
-              { $ifNull: ["$genres", []] },
-              characteristics.topGenres
-            ]
-          },
+          { $setIntersection: [{ $ifNull: ["$genres", []] }, characteristics.topGenres] },
           []
         ]
       }
     };
   }
 
-  // Score by category overlap
   if (characteristics.topCategories.length > 0) {
     scoreFields.catScore = {
       $size: {
         $ifNull: [
-          {
-            $setIntersection: [
-              { $ifNull: ["$categories", []] },
-              characteristics.topCategories
-            ]
-          },
+          { $setIntersection: [{ $ifNull: ["$categories", []] }, characteristics.topCategories] },
           []
         ]
       }
     };
   }
 
-  // Score by developer overlap
   if (characteristics.topDevelopers.length > 0) {
     scoreFields.devScore = {
       $size: {
         $ifNull: [
-          {
-            $setIntersection: [
-              { $ifNull: ["$developers", []] },
-              characteristics.topDevelopers
-            ]
-          },
+          { $setIntersection: [{ $ifNull: ["$developers", []] }, characteristics.topDevelopers] },
           []
         ]
       }
     };
   }
 
-  // Score by language overlap
   if (characteristics.topLanguages.length > 0) {
     scoreFields.langScore = {
       $size: {
         $ifNull: [
-          {
-            $setIntersection: [
-              { $ifNull: ["$supported_languages", []] },
-              characteristics.topLanguages
-            ]
-          },
+          { $setIntersection: [{ $ifNull: ["$supported_languages", []] }, characteristics.topLanguages] },
           []
         ]
       }
     };
   }
 
-  // Score by price similarity (0-10 points)
+  // Price similarity: linear penalty by distance from favorite average, capped
   if (characteristics.avgPrice != null) {
     scoreFields.priceScore = {
       $cond: {
         if: { $and: [
           { $gte: ["$price", 0] },
+          // crude upper bound to avoid rewarding extreme outliers
           { $lte: ["$price", { $multiply: [characteristics.avgPrice, 3] }] }
         ]},
         then: {
@@ -537,7 +448,7 @@ async function buildRecommendationScoring(favAppids, characteristics) {
                 {
                   $divide: [
                     { $abs: { $subtract: ["$price", characteristics.avgPrice] } },
-                    { $add: [characteristics.avgPrice, 1] }
+                    { $add: [characteristics.avgPrice, 1] } // avoid division by zero
                   ]
                 }
               ]
@@ -549,90 +460,74 @@ async function buildRecommendationScoring(favAppids, characteristics) {
     };
   }
 
-  // Calculate weighted total recommendation score
+  // Weighted sum: genre dominates, then category/dev/lang, then price & rating bonus
   scoreFields.recommendationScore = {
     $add: [
-      // Genre is CRITICAL - 100 points per match
       { $multiply: [{ $ifNull: ["$genreScore", 0] }, 100] },
-      
-      // Categories - 30 points per match
       { $multiply: [{ $ifNull: ["$catScore", 0] }, 30] },
-      
-      // Developer - 20 points per match
       { $multiply: [{ $ifNull: ["$devScore", 0] }, 20] },
-      
-      // Language - 10 points per match
       { $multiply: [{ $ifNull: ["$langScore", 0] }, 10] },
-      
-      // Price similarity - 0 to 10 points
       { $ifNull: ["$priceScore", 0] },
-      
-      // User rating bonus - 0 to 5 points
       { $divide: [{ $ifNull: ["$user_score", 0] }, 20] },
     ]
   };
 
-  return [
-    { $addFields: scoreFields }
-  ];
+  return [{ $addFields: scoreFields }];
 }
 
 /* -------------------------------------------------------------------------- */
-/* Utils: Build $sort object                                                  */
+/* Utils: Build $sort                                                         */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Builds a MongoDB $sort object based on sort key.
- * For recommendations, sorts by recommendation score first.
- * 
- * @param {string} sortKey - Sort key (e.g., "name-asc", "price-desc")
- * @param {boolean} isRecommendation - Whether this is a recommendation query
- * @returns {Object} - MongoDB $sort object
+ * Translate a sort key into a MongoDB sort object.
+ * For recommendation queries, score takes precedence, then rating, then name.
+ *
+ * @param {string} [sortKey="name-asc"] - Frontend sort key.
+ * @param {boolean} [isRecommendation=false] - If true, sort by recommendationScore.
+ * @returns {Record<string, 1|-1>} - $sort document.
  */
 function buildSort(sortKey = "name-asc", isRecommendation = false) {
   if (isRecommendation) {
-    // For recommendations: sort by score (desc), then rating, then name
     return { recommendationScore: -1, user_score: -1, name: 1 };
   }
-  
-  // Standard sort options
-  return {
-    "name-asc": { name: 1 },
+  return ({
+    "name-asc":  { name: 1 },
     "name-desc": { name: -1 },
     "price-asc": { price: 1 },
-    "price-desc": { price: -1 },
+    "price-desc":{ price: -1 },
     "date-desc": { release_date_parsed: -1 },
-    "date-asc": { release_date_parsed: 1 },
+    "date-asc":  { release_date_parsed: 1 },
     "rating-desc": { user_score: -1 },
-  }[sortKey] || { name: 1 };
+  }[sortKey] || { name: 1 });
 }
 
 /* -------------------------------------------------------------------------- */
-/* Utils: Build projection list for returned fields                           */
+/* Utils: Build projection                                                    */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Builds a MongoDB projection object to control which fields are returned.
- * 
- * @param {Object} reqProjection - Custom projection from request
- * @returns {Object} - MongoDB projection object
+ * Normalize a projection argument into a MongoDB $project document.
+ * If no custom projection is provided, return a small default selection.
+ *
+ * @param {Record<string, 0|1>} reqProjection - Optional request-driven projection.
+ * @returns {Record<string, 0|1>} - Field inclusion/exclusion map.
  */
 function buildProjectList(reqProjection) {
   if (reqProjection && typeof reqProjection === "object") return reqProjection;
-  // Default: return minimal fields
   return { name: 1, header_image: 1, genres: 1, price: 1 };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Helper: GOTY per-profile join stages                                       */
+/* Helper: GOTY join                                                          */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Creates aggregation stages to join GOTY (Game of the Year) data.
- * Attaches "goty_year" field to games that are marked as GOTY for the profile.
- * 
- * @param {string} profile - Profile ID (kid, person1, person2)
- * @returns {Array} - MongoDB aggregation stages
+ * Add a left-join to the per-profile GOTY collection and expose `goty_year`.
+ * This is used both to display a badge in results and to filter the GOTY tab.
+ *
+ * @param {string} [profile="person1"] - Active profile id.
+ * @returns {import("mongodb").Document[]} - Aggregation stages ($lookup/$addFields/$project).
  */
 function gotyJoinStages(profile = "person1") {
   return [
@@ -658,26 +553,29 @@ function gotyJoinStages(profile = "person1") {
       },
     },
     { $addFields: { goty_year: { $ifNull: [{ $arrayElemAt: ["$gotyP.year", 0] }, null] } } },
-    { $project: { gotyP: 0 } }, // Remove temporary join field
+    { $project: { gotyP: 0 } },
   ];
 }
 
 /* -------------------------------------------------------------------------- */
-/* Main pipeline builder: Combines all filters, scoring, and pagination       */
+/* Pipeline builder: search/favorites/recommendations/GOTY + pagination       */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Builds the complete MongoDB aggregation pipeline for game search.
- * Handles regular searches, favorites, recommendations, and GOTY filtering.
- * Uses $facet to return both items and total count in one query.
- * 
- * @param {Object} options - Pipeline options
- * @param {Object} options.filters - Filter object from frontend
- * @param {string} options.sort - Sort key
- * @param {number} options.page - Current page number
- * @param {number} options.limit - Items per page
- * @param {Object} options.projection - Field projection
- * @returns {Array} - Complete MongoDB aggregation pipeline
+ * Assemble a complete aggregation pipeline that:
+ * - Parses and adds a sortable `release_date_parsed` (from string).
+ * - Applies $match (standard or recommendation-specific).
+ * - Adds recommendation scoring (if applicable).
+ * - Joins GOTY and optionally filters to GOTY-only view.
+ * - Uses $facet to return both `items` and `total` on the first page.
+ *
+ * @param {Object} options
+ * @param {Record<string, any>} options.filters
+ * @param {string} options.sort
+ * @param {number} options.page
+ * @param {number} options.limit
+ * @param {Record<string, 0|1>} options.projection
+ * @returns {Promise<import("mongodb").Document[]>} Aggregation pipeline array.
  */
 async function buildSearchPipeline({
   filters = {},
@@ -695,15 +593,15 @@ async function buildSearchPipeline({
   let characteristics = null;
 
   if (isRecommendation) {
-    // Build recommendation-specific pipeline
+    // Recommendation flavor: match + scoring based on favorites-derived profile
     const favAppids = Array.isArray(filters.appids) && filters.appids.length ? filters.appids : [];
-    characteristics = favAppids.length > 0 ? await getFavoriteCharacteristics(favAppids, profile) : null;
+    characteristics = favAppids.length ? await getFavoriteCharacteristics(favAppids, profile) : null;
     $match = await buildRecommendationMatch(filters);
-    
+
     if (!$match) {
-      // No favorites or characteristics - return empty pipeline
+      // Return an empty facet structure when we cannot provide recs
       return [
-        { $match: { _id: null } }, // Match nothing
+        { $match: { _id: null } },
         {
           $facet: {
             items: [],
@@ -716,20 +614,17 @@ async function buildSearchPipeline({
       ];
     }
 
-    // Add scoring stages for recommendations
     scoringStages = await buildRecommendationScoring(filters.appids, characteristics);
   } else {
-    // Standard search pipeline
     $match = buildMatch(filters);
   }
 
   const $sort = buildSort(sort, isRecommendation);
   const $project = buildProjectList(projection);
 
-  // Base pipeline stages
   const base = [
+    // Normalize `release_date` (string) into a Date for server-side sorting
     {
-      // Parse release_date string to Date object for sorting
       $addFields: {
         release_date_parsed: {
           $dateFromString: {
@@ -746,19 +641,16 @@ async function buildSearchPipeline({
     ...gotyJoinStages(profile),
   ].filter(Boolean);
 
-  // Post-match filters for GOTY category (applied after join)
+  // GOTY tab-specific filter (after join so we have goty_year)
   const postMatch = [];
   if (filters.category === "goty") {
     if (filters.gotyYear) {
-      // Filter by specific GOTY year
       postMatch.push({ $match: { goty_year: Number(filters.gotyYear) } });
     } else {
-      // Show all GOTY games
       postMatch.push({ $match: { goty_year: { $ne: null } } });
     }
   }
 
-  // Return complete pipeline with $facet for items + total count
   return [
     ...base,
     ...postMatch,
@@ -784,9 +676,25 @@ async function buildSearchPipeline({
 /* -------------------------------------------------------------------------- */
 
 /**
- * Main search API endpoint.
- * Handles all game queries: search, filters, favorites, recommendations, GOTY.
- * Returns paginated results with total count.
+ * POST /api/games/search
+ * Unified search endpoint supporting:
+ * - Standard filter-based search
+ * - Favorites (by appids) and GOTY filtering
+ * - Recommendations (genre/category overlap + scoring)
+ * - Pagination and optional total counting (only on page 1 by default)
+ *
+ * Request body:
+ * {
+ *   filters: {...},       // see buildMatch/buildRecommendationMatch
+ *   sort: "name-asc"|..., // see buildSort
+ *   page: 1,              // 1-based
+ *   limit: 40,
+ *   projection: {...},    // optional field projection
+ *   withTotal: true|false // usually true for first page only
+ * }
+ *
+ * Response:
+ * { ok, page, limit, total|null, hasMore, items: [...] }
  */
 router.post("/search", async (req, res) => {
   try {
@@ -796,31 +704,26 @@ router.post("/search", async (req, res) => {
       page = 1,
       limit = 40,
       projection,
-      withTotal = page === 1, // Only count total on first page
+      withTotal = page === 1, // optimization: count only on the first page
     } = req.body || {};
 
     const skip = (Math.max(1, Number(page)) - 1) * Math.max(1, Number(limit));
     const profile = String(filters.profile || "person1");
     const isRecommendation = filters.category === "recommendations";
 
-    // Build pipeline (with or without $count based on withTotal flag)
+    // Build either the full $facet pipeline or a light version (no $count)
     const pipeline = withTotal
       ? await buildSearchPipeline({ filters, sort, page, limit, projection })
       : await (async () => {
-          // Lightweight pipeline without $count for subsequent pages
           let $match;
           let scoringStages = [];
           let characteristics = null;
 
           if (isRecommendation) {
             const favAppids = Array.isArray(filters.appids) && filters.appids.length ? filters.appids : [];
-            characteristics = favAppids.length > 0 ? await getFavoriteCharacteristics(favAppids, profile) : null;
+            characteristics = favAppids.length ? await getFavoriteCharacteristics(favAppids, profile) : null;
             $match = await buildRecommendationMatch(filters);
-            
-            if (!$match) {
-              return [{ $match: { _id: null } }];
-            }
-
+            if (!$match) return [{ $match: { _id: null } }];
             scoringStages = await buildRecommendationScoring(filters.appids, characteristics);
           } else {
             $match = buildMatch(filters);
@@ -839,9 +742,7 @@ router.post("/search", async (req, res) => {
                 },
               },
             },
-            ...(() => {
-              return Object.keys($match).length ? [{ $match }] : [];
-            })(),
+            ...(Object.keys($match).length ? [{ $match }] : []),
             ...scoringStages,
             ...gotyJoinStages(profile),
             ...(() => {
@@ -856,14 +757,15 @@ router.post("/search", async (req, res) => {
           ];
         })();
 
-    // Execute aggregation with disk use allowed for large datasets
+    // AllowDiskUse supports large sorts; collation improves text matching
     let agg = Game.aggregate(pipeline).allowDiskUse(true);
 
-    // Apply locale collation for text searches (case/accent insensitive)
+    // Apply a locale collation when user provided text terms (case/diacritic-insensitive)
     if (
       (filters && String(filters.search || "").trim()) ||
       (filters && String(filters.developer || "").trim())
     ) {
+      // 'es' locale with strength:1 ignores case and accents.
       agg = agg.collation({ locale: "es", strength: 1, caseLevel: false });
     }
 
@@ -873,16 +775,14 @@ router.post("/search", async (req, res) => {
     let total = null;
 
     if (withTotal) {
-      // Extract items and total from $facet result
       const bucket = out[0] || {};
       items = bucket.items || [];
       total = typeof bucket.total === "number" ? bucket.total : 0;
     } else {
-      // No total count - just items
       items = out || [];
     }
 
-    // Determine if there are more pages
+    // Infer hasMore either from total (when available) or page size
     const hasMore = total != null
       ? (skip + items.length) < total
       : (items.length === Math.max(1, Number(limit)));
@@ -902,37 +802,32 @@ router.post("/search", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* DISTINCT endpoints - Get unique values for filters                         */
+/* DISTINCT endpoints - Unique values for UI filters                          */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Builds an aggregation pipeline to get distinct values for a field.
- * Applies current filters to show only relevant options.
- * 
- * @param {string} field - Field name (genres, supported_languages, developers)
- * @param {Object} filters - Current filter state
- * @returns {Array} - MongoDB aggregation pipeline
+ * Build a pipeline to compute distinct values for a given array field
+ * under the current filters (so options remain relevant to the current view).
+ * - Uses $unwind to explode the array.
+ * - Trims/coerces to string, removes empties, groups by value, sorts A→Z.
+ *
+ * @param {"genres"|"supported_languages"|"developers"} field - Array field name.
+ * @param {Record<string, any>} filters - Filter context (e.g., profile, kid-safety).
+ * @returns {import("mongodb").Document[]} Aggregation pipeline stages.
  */
 function buildDistinctPipeline(field, filters = {}) {
   const $match = buildMatch(filters);
   return [
     Object.keys($match).length ? { $match } : null,
     { $unwind: { path: `$${field}`, preserveNullAndEmptyArrays: false } },
-    {
-      $group: {
-        _id: { $trim: { input: { $toString: `$${field}` } } },
-      },
-    },
-    { $match: { _id: { $ne: "" } } }, // Remove empty strings
-    { $sort: { _id: 1 } }, // Alphabetical sort
+    { $group: { _id: { $trim: { input: { $toString: `$${field}` } } } } },
+    { $match: { _id: { $ne: "" } } },
+    { $sort: { _id: 1 } },
     { $project: { _id: 0, value: "$_id" } },
   ].filter(Boolean);
 }
 
-/**
- * GET /api/games/distinct/genres
- * Returns all unique game genres (filtered by current search/profile).
- */
+/** GET /api/games/distinct/genres — list of genres relevant to current filters. */
 router.get("/distinct/genres", async (req, res) => {
   try {
     const pipeline = buildDistinctPipeline("genres", req.query);
@@ -944,10 +839,7 @@ router.get("/distinct/genres", async (req, res) => {
   }
 });
 
-/**
- * GET /api/games/distinct/languages
- * Returns all unique supported languages (filtered by current search/profile).
- */
+/** GET /api/games/distinct/languages — list of languages relevant to current filters. */
 router.get("/distinct/languages", async (req, res) => {
   try {
     const pipeline = buildDistinctPipeline("supported_languages", req.query);
@@ -959,10 +851,7 @@ router.get("/distinct/languages", async (req, res) => {
   }
 });
 
-/**
- * GET /api/games/distinct/developers
- * Returns all unique game developers (filtered by current search/profile).
- */
+/** GET /api/games/distinct/developers — list of developers relevant to current filters. */
 router.get("/distinct/developers", async (req, res) => {
   try {
     const pipeline = buildDistinctPipeline("developers", req.query);
@@ -975,24 +864,29 @@ router.get("/distinct/developers", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* GET /api/games/:id - Get single game details                               */
+/* GET /api/games/:id - Fetch a single game by Mongo _id or Steam appid       */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Get a single game by MongoDB _id or Steam appid.
- * Returns full game document with all fields.
+ * GET /api/games/:id
+ * Resolve a single game document by:
+ * 1) MongoDB ObjectId (if :id is a valid ObjectId), else
+ * 2) Steam appid (string equality on Game.appid).
+ *
+ * Response:
+ *  - 200 { ok:true, data:<document> }
+ *  - 404 { ok:false, error:"not_found" }
+ *  - 500 { ok:false, error:"server_error" }
  */
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Try finding by MongoDB _id first
     if (mongoose.isValidObjectId(id)) {
       const g = await Game.findById(id).lean();
       if (g) return res.json({ ok: true, data: g });
     }
 
-    // Try finding by Steam appid
     const g2 = await Game.findOne({ appid: String(id) }).lean();
     if (!g2) return res.status(404).json({ ok: false, error: "not_found" });
 
@@ -1004,12 +898,12 @@ router.get("/:id", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* RAW AGGREGATION endpoint - For advanced queries                            */
+/* RAW aggregation endpoint (guarded)                                         */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Allowed MongoDB aggregation stages for security.
- * Prevents dangerous operations like $where, $function.
+ * Whitelist of allowed aggregation stages to reduce the attack surface.
+ * Disallows JS execution stages/operators.
  */
 const ALLOWED_STAGES = new Set([
   "$match", "$project", "$sort", "$limit", "$skip",
@@ -1019,14 +913,15 @@ const ALLOWED_STAGES = new Set([
   "$setWindowFields"
 ]);
 
-/**
- * Forbidden MongoDB operators that could execute arbitrary code.
- */
+/** Forbidden operators due to arbitrary code execution risk. */
 const FORBIDDEN_KEYS = ["$where", "$function", "$accumulator"];
 
 /**
- * Parses a MongoDB shell command into a pipeline array.
- * Example: "db.games.aggregate([{$match:{}}])" → [{$match:{}}]
+ * Extract a pipeline array from a mongo shell-like command string.
+ * Example input: 'db.games.aggregate([ { "$match": {} } ])'
+ * @param {string} cmd - Raw command text.
+ * @returns {Array} - Parsed pipeline array.
+ * @throws {SyntaxError} - If it cannot detect/parse the array.
  */
 function parseCommandToPipeline(cmd) {
   const m = String(cmd).match(/aggregate\s*\(\s*(\[.*\])\s*\)/s);
@@ -1035,13 +930,17 @@ function parseCommandToPipeline(cmd) {
 }
 
 /**
- * Validates an aggregation pipeline for security.
- * Ensures only allowed stages are used and no forbidden operators.
+ * Validate a pipeline:
+ * - Ensures it is an array of single-operator objects (one key per stage).
+ * - Ensures each stage operator is whitelisted.
+ * - Recursively rejects any use of FORBIDDEN_KEYS inside stage payloads.
+ *
+ * @param {Array<Record<string, any>>} pipeline - Aggregation pipeline.
+ * @throws {Error} - On structural violations or forbidden usage.
  */
 function validatePipeline(pipeline) {
   if (!Array.isArray(pipeline)) throw new Error("pipeline_must_be_array");
 
-  // Recursively scan for forbidden operators
   const scan = (node) => {
     if (node && typeof node === "object") {
       for (const k of Object.keys(node)) {
@@ -1053,7 +952,6 @@ function validatePipeline(pipeline) {
     }
   };
 
-  // Validate each stage
   for (const stage of pipeline) {
     if (!stage || typeof stage !== "object") throw new Error("stage_must_be_object");
     const keys = Object.keys(stage);
@@ -1066,22 +964,32 @@ function validatePipeline(pipeline) {
 
 /**
  * POST /api/games/agg
- * Executes a custom MongoDB aggregation pipeline.
- * Used for advanced queries and analytics.
- * 
- * Security: Only allows whitelisted stages, validates input.
+ * Execute a custom aggregation against the games collection.
+ *
+ * Security controls:
+ * - Only a safe subset of stages is allowed (ALLOWED_STAGES).
+ * - Pipelines are validated to reject $where/$function/$accumulator.
+ * - Optional timeouts and allowDiskUse are applied to the operation.
+ *
+ * Request body:
+ * {
+ *   pipeline?: Array,                 // direct JSON pipeline
+ *   command?: string,                 // or a shell-like string with aggregate([...])
+ *   allowDiskUse?: boolean = true,
+ *   maxTimeMS?: number = 5000
+ * }
+ *
+ * Response:
+ * { ok:true, items:[...] } on success.
+ * { ok:false, error:<reason> } on validation/syntax errors (HTTP 400).
  */
 router.post("/agg", async (req, res) => {
   try {
     const { pipeline, command, allowDiskUse = true, maxTimeMS = 5000 } = req.body || {};
-    
-    // Parse pipeline from JSON or shell command string
     const pipe = pipeline ? pipeline : parseCommandToPipeline(command);
-    
-    // Validate for security
+
     validatePipeline(pipe);
 
-    // Execute with timeout and disk use
     const cursor = Game.aggregate(pipe, { allowDiskUse }).option({ maxTimeMS });
     const items = await cursor.exec();
 
