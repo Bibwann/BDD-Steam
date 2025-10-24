@@ -1001,4 +1001,109 @@ router.post("/agg", async (req, res) => {
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/* GOTY endpoints (SET/UNSET with upsert & validation)                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Resolve allowed profiles from the Goty schema enum dynamically.
+ * This helps keep the router aligned with the model without hardcoding values.
+ */
+function getAllowedProfiles() {
+  // Mongoose may expose enum values under `options.enum` or `enumValues`
+  const path = Goty?.schema?.path?.("profile");
+  const enumA = path?.options?.enum;
+  const enumB = path?.enumValues;
+  const list = Array.isArray(enumA) && enumA.length ? enumA : (Array.isArray(enumB) && enumB.length ? enumB : null);
+  // Fallback (kept for backwards-compatibility if the schema lacks enum)
+  return Array.isArray(list) && list.length ? list.map(String) : ["kid", "person1", "person2"];
+}
+
+/**
+ * POST /api/games/goty/set
+ * Create or replace the GOTY for a (profile, year) pair. This uses an UPSERT to
+ * avoid duplicate-key errors against the unique compound index (profile, year).
+ *
+ * Body: { appid: string, year: number, profile: string }
+ * Success: { ok:true, goty:{...} }
+ */
+router.post("/goty/set", async (req, res, next) => {
+  try {
+    let { appid, year, profile } = req.body || {};
+
+    // Basic normalization
+    appid = String(appid || "").trim();
+    const y = Number(year);
+    profile = String(profile || "").trim();
+
+    // Basic validation before hitting Mongoose validators
+    if (!appid) return res.status(400).json({ ok: false, error: "missing_appid" });
+    if (!Number.isInteger(y)) return res.status(400).json({ ok: false, error: "invalid_year" });
+
+    const allowed = getAllowedProfiles();
+    if (!allowed.includes(profile)) {
+      // Early feedback if the profile is not in the enum (or fallback list)
+      return res.status(400).json({ ok: false, error: "invalid_profile", allowed });
+    }
+
+    // Upsert to guarantee a single GOTY per (profile,year)
+    const doc = await Goty.findOneAndUpdate(
+      { profile, year: y },
+      { $set: { appid, profile, year: y } },
+      {
+        upsert: true,
+        new: true,
+        runValidators: true,         // honor schema validation & enum
+        setDefaultsOnInsert: true,
+        context: "query",
+      }
+    ).lean();
+
+    return res.json({ ok: true, goty: doc });
+  } catch (err) {
+    // Friendly duplicate-key handling just in case (rare due to upsert)
+    if (err && err.code === 11000) {
+      return res.status(409).json({ ok: false, error: "duplicate_goty", detail: err.keyValue });
+    }
+    next(err);
+  }
+});
+
+/**
+ * POST /api/games/goty/unset
+ * Remove the GOTY record by (profile + year) OR (profile + appid).
+ *
+ * Body: { profile: string, year?: number, appid?: string }
+ * Success: { ok:true, removed:{...} }
+ */
+router.post("/goty/unset", async (req, res, next) => {
+  try {
+    let { year, appid, profile } = req.body || {};
+    profile = String(profile || "").trim();
+    const y = year !== undefined ? Number(year) : undefined;
+    appid = appid !== undefined ? String(appid).trim() : undefined;
+
+    const allowed = getAllowedProfiles();
+    if (!allowed.includes(profile)) {
+      return res.status(400).json({ ok: false, error: "invalid_profile", allowed });
+    }
+    if (y === undefined && !appid) {
+      return res.status(400).json({ ok: false, error: "missing_selector" });
+    }
+    if (y !== undefined && !Number.isInteger(y)) {
+      return res.status(400).json({ ok: false, error: "invalid_year" });
+    }
+
+    const filter = { profile };
+    if (appid) filter.appid = appid;
+    if (y !== undefined) filter.year = y;
+
+    const out = await Goty.findOneAndDelete(filter).lean();
+    if (!out) return res.status(404).json({ ok: false, error: "not_found" });
+    return res.json({ ok: true, removed: out });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;
