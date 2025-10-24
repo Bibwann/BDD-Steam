@@ -188,6 +188,11 @@ async function getFavoriteCharacteristics(appids, profile = "person1") {
   const favorites = await Game.find(query)
     .select("genres supported_languages developers categories price")
     .lean();
+  // MongoDB (shell) equivalent of the query above:
+  // db.games.find(
+  //   { appid: { $in: ["<id1>","<id2>", "..."] }, /* + getKidSafetyFilter() if profile==="kid" */ },
+  //   { genres: 1, supported_languages: 1, developers: 1, categories: 1, price: 1 }
+  // )
 
   if (favorites.length === 0) return null;
 
@@ -530,6 +535,27 @@ function buildProjectList(reqProjection) {
  * @returns {import("mongodb").Document[]} - Aggregation stages ($lookup/$addFields/$project).
  */
 function gotyJoinStages(profile = "person1") {
+  // MongoDB (shell) equivalent inside an aggregate:
+  // { $lookup: {
+  //     from: "gotys",
+  //     let: { app: "$appid" },
+  //     pipeline: [
+  //       { $match: {
+  //           $expr: {
+  //             $and: [
+  //               { $eq: ["$appid", "$$app"] },
+  //               { $eq: ["$profile", String(profile || "person1")] }
+  //             ]
+  //           }
+  //         }
+  //       },
+  //       { $project: { _id: 0, year: 1 } },
+  //       { $limit: 1 }
+  //     ],
+  //     as: "gotyP"
+  // } },
+  // { $addFields: { goty_year: { $ifNull: [ { $arrayElemAt: ["$gotyP.year", 0] }, null ] } } },
+  // { $project: { gotyP: 0 } }
   return [
     {
       $lookup: {
@@ -651,6 +677,21 @@ async function buildSearchPipeline({
     }
   }
 
+  // MongoDB (shell) when this pipeline runs later:
+  // db.games.aggregate(
+  //   [ ...base, ...postMatch,
+  //     { $facet: {
+  //         items: [ { $sort: <sort> }, { $skip: <skip> }, { $limit: <limit> }, { $project: <project> } ],
+  //         meta: [ { $count: "total" } ]
+  //       }
+  //     },
+  //     { $unwind: { path: "$meta", preserveNullAndEmptyArrays: true } },
+  //     { $addFields: { total: { $ifNull: ["$meta.total", 0] } } },
+  //     { $project: { meta: 0 } }
+  //   ],
+  //   { allowDiskUse: true /* and optionally collation, see router.post("/search") */ }
+  // )
+
   return [
     ...base,
     ...postMatch,
@@ -759,6 +800,8 @@ router.post("/search", async (req, res) => {
 
     // AllowDiskUse supports large sorts; collation improves text matching
     let agg = Game.aggregate(pipeline).allowDiskUse(true);
+    // MongoDB (shell) equivalent:
+    // db.games.aggregate(pipeline, { allowDiskUse: true })
 
     // Apply a locale collation when user provided text terms (case/diacritic-insensitive)
     if (
@@ -767,6 +810,11 @@ router.post("/search", async (req, res) => {
     ) {
       // 'es' locale with strength:1 ignores case and accents.
       agg = agg.collation({ locale: "es", strength: 1, caseLevel: false });
+      // MongoDB (shell) equivalent (when collation applies):
+      // db.games.aggregate(pipeline, {
+      //   allowDiskUse: true,
+      //   collation: { locale: "es", strength: 1, caseLevel: false }
+      // })
     }
 
     const out = await agg;
@@ -817,6 +865,15 @@ router.post("/search", async (req, res) => {
  */
 function buildDistinctPipeline(field, filters = {}) {
   const $match = buildMatch(filters);
+  // MongoDB (shell) equivalent when this pipeline is used:
+  // db.games.aggregate([
+  //   ...(Object.keys($match).length ? [{ $match }] : []),
+  //   { $unwind: { path: "$" + field, preserveNullAndEmptyArrays: false } },
+  //   { $group: { _id: { $trim: { input: { $toString: "$" + field } } } } },
+  //   { $match: { _id: { $ne: "" } } },
+  //   { $sort: { _id: 1 } },
+  //   { $project: { _id: 0, value: "$_id" } }
+  // ])
   return [
     Object.keys($match).length ? { $match } : null,
     { $unwind: { path: `$${field}`, preserveNullAndEmptyArrays: false } },
@@ -832,6 +889,8 @@ router.get("/distinct/genres", async (req, res) => {
   try {
     const pipeline = buildDistinctPipeline("genres", req.query);
     const rows = await Game.aggregate(pipeline);
+    // MongoDB (shell) equivalent:
+    // db.games.aggregate(pipeline)
     res.json({ ok: true, items: rows.map(r => r.value) });
   } catch (e) {
     console.error("distinct genres error:", e);
@@ -844,6 +903,8 @@ router.get("/distinct/languages", async (req, res) => {
   try {
     const pipeline = buildDistinctPipeline("supported_languages", req.query);
     const rows = await Game.aggregate(pipeline);
+    // MongoDB (shell) equivalent:
+    // db.games.aggregate(pipeline)
     res.json({ ok: true, items: rows.map(r => r.value) });
   } catch (e) {
     console.error("distinct languages error:", e);
@@ -856,6 +917,8 @@ router.get("/distinct/developers", async (req, res) => {
   try {
     const pipeline = buildDistinctPipeline("developers", req.query);
     const rows = await Game.aggregate(pipeline);
+    // MongoDB (shell) equivalent:
+    // db.games.aggregate(pipeline)
     res.json({ ok: true, items: rows.map(r => r.value) });
   } catch (e) {
     console.error("distinct developers error:", e);
@@ -884,10 +947,14 @@ router.get("/:id", async (req, res) => {
 
     if (mongoose.isValidObjectId(id)) {
       const g = await Game.findById(id).lean();
+      // MongoDB (shell) equivalent:
+      // db.games.findOne({ _id: ObjectId("<id>") })
       if (g) return res.json({ ok: true, data: g });
     }
 
     const g2 = await Game.findOne({ appid: String(id) }).lean();
+    // MongoDB (shell) equivalent:
+    // db.games.findOne({ appid: "<appid>" })
     if (!g2) return res.status(404).json({ ok: false, error: "not_found" });
 
     res.json({ ok: true, data: g2 });
@@ -991,6 +1058,8 @@ router.post("/agg", async (req, res) => {
     validatePipeline(pipe);
 
     const cursor = Game.aggregate(pipe, { allowDiskUse }).option({ maxTimeMS });
+    // MongoDB (shell) equivalent:
+    // db.games.aggregate(pipe, { allowDiskUse: true, maxTimeMS: 5000 })
     const items = await cursor.exec();
 
     res.json({ ok: true, items });
@@ -1058,6 +1127,12 @@ router.post("/goty/set", async (req, res, next) => {
         context: "query",
       }
     ).lean();
+    // MongoDB (shell) equivalent:
+    // db.gotys.updateOne(
+    //   { profile: "<profile>", year: <year> },
+    //   { $set: { appid: "<appid>", profile: "<profile>", year: <year> } },
+    //   { upsert: true }
+    // )
 
     return res.json({ ok: true, goty: doc });
   } catch (err) {
@@ -1099,6 +1174,8 @@ router.post("/goty/unset", async (req, res, next) => {
     if (y !== undefined) filter.year = y;
 
     const out = await Goty.findOneAndDelete(filter).lean();
+    // MongoDB (shell) equivalent:
+    // db.gotys.findOneAndDelete(<filter>)
     if (!out) return res.status(404).json({ ok: false, error: "not_found" });
     return res.json({ ok: true, removed: out });
   } catch (err) {
